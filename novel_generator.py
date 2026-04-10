@@ -116,6 +116,11 @@ def slug(name: str) -> str:
 # ── Markdown book parser ───────────────────────────────────────────────────────
 
 _MD_CH_RE = re.compile(r"^##\s+Chapter\s+(\d+)[:\s\-]*(.*)$", re.IGNORECASE)
+_PROMO_LINE_RE = re.compile(
+    r"(patre\.?on|patreon\.com|chapters?\s+in\s+advance|^\s*\[?\d+\s+chapters?\s+in\s+advance\]?\s*$)",
+    re.IGNORECASE,
+)
+_DOTS_RE = re.compile(r"^\s*\.{3,}\s*$")
 
 
 def parse_markdown_book(md_text: str) -> list:
@@ -160,6 +165,46 @@ def parse_markdown_book(md_text: str) -> list:
             chapters.append(Chapter(cur_num, cur_title, body))
 
     return chapters
+
+
+def clean_master_markdown_text(md_text: str) -> tuple[str, int, int]:
+    """
+    Remove common author promo/noise lines and duplicate chapter headers.
+    Returns (cleaned_text, removed_noise_lines, removed_duplicate_headers).
+    """
+    lines = md_text.splitlines()
+    out = []
+    removed_noise = 0
+    removed_dupes = 0
+
+    last_header_key = None
+    saw_substantive_since_header = False
+
+    for line in lines:
+        s = line.strip()
+        if s and (_PROMO_LINE_RE.search(s) or _DOTS_RE.match(s)):
+            removed_noise += 1
+            continue
+
+        m = _MD_CH_RE.match(s)
+        if m:
+            key = f"{int(m.group(1))}:{re.sub(r'\\s+', ' ', (m.group(2) or '').strip().lower())}"
+            if key == last_header_key and not saw_substantive_since_header:
+                removed_dupes += 1
+                continue
+            out.append(line)
+            last_header_key = key
+            saw_substantive_since_header = False
+            continue
+
+        out.append(line)
+        if s:
+            saw_substantive_since_header = True
+
+    cleaned = "\n".join(out)
+    if md_text.endswith("\n"):
+        cleaned += "\n"
+    return cleaned, removed_noise, removed_dupes
 
 
 # ── Data structures ───────────────────────────────────────────────────────────
@@ -296,6 +341,22 @@ class EpubHandler:
             lines.append("")
 
         md_text = "\n".join(lines)
+        md_text, removed_noise, removed_dupes = clean_master_markdown_text(md_text)
+
+        # Keep frontmatter chapter count aligned with cleaned markdown.
+        parsed_count = len(parse_markdown_book(md_text))
+        md_text = re.sub(
+            r"^chapters:\s*\d+\s*$",
+            f"chapters: {parsed_count}",
+            md_text,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+
+        if removed_noise or removed_dupes:
+            print(
+                f"[EpubHandler] Cleanup applied: removed {removed_noise} promo/noise lines, "
+                f"{removed_dupes} duplicate chapter headers."
+            )
         print(f"[EpubHandler] Converted to structured markdown ({len(md_text)} chars).")
         return md_text, book
 

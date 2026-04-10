@@ -92,7 +92,12 @@ python3 novel_generator.py my_novel.txt 3 --book-id cultivation_story
 ## Input Format
 
 ### EPUB (recommended)
-Any standard `.epub` file. The script reads chapters in spine order, skips short navigation pages, and detects chapter headers automatically. The output is a new EPUB file with the generated chapters appended — the original is never modified.
+Any standard `.epub` file. The script reads chapters in spine order, skips short navigation pages, and detects chapter headers automatically. On EPUB import it now also cleans common junk from source text:
+- duplicate chapter headers repeated back-to-back
+- promo lines (Patreon links / "chapters in advance" style lines)
+- dot-separator noise lines (`.....`)
+
+The output is a new EPUB file with the generated chapters appended — the original is never modified.
 
 ### TXT
 The `.txt` file should have chapter headers in any common format:
@@ -168,6 +173,54 @@ Permanently removes everything — the `novel_books/<id>` folder and the `chroma
 python3 book_manager.py delete cultivation_story --yes
 ```
 
+### Cleanup an existing master book
+```bash
+python3 book_manager.py cleanup cultivation_story
+```
+Removes duplicated chapter headers and common promo/noise lines from `master_book.md`.
+
+Optional:
+```bash
+python3 book_manager.py cleanup cultivation_story --no-backup
+```
+
+### Rebuild state files from `master_book.md`
+```bash
+python3 book_manager.py rebuild-state cultivation_story
+```
+Re-parses chapters from `master_book.md` and rewrites:
+- `chapter_summaries.json`
+- `recent_chapters.json`
+- `world_state.json` (`chapter_count` corrected)
+- keeps `arc_summaries.json` valid JSON
+
+Useful when chapter numbers drift (for example if generated chapters started at the wrong number).
+
+Options:
+```bash
+python3 book_manager.py rebuild-state cultivation_story --dry-run
+python3 book_manager.py rebuild-state cultivation_story --no-renumber
+python3 book_manager.py rebuild-state cultivation_story --no-backup
+```
+
+### Reconvert `master_book.md` into EPUB
+```bash
+python3 book_manager.py reconvert-epub cultivation_story
+```
+Builds a fresh `<source>_with_generated.epub` from `master_book.md` using `novel_generator.py` EPUB conversion logic.
+
+Options:
+```bash
+python3 book_manager.py reconvert-epub cultivation_story --output novel_books/cultivation_story/custom.epub
+python3 book_manager.py reconvert-epub cultivation_story --template /path/to/original.epub
+```
+
+### Rebuild ChromaDB for a book
+```bash
+python3 book_manager.py rebuild-chroma cultivation_story
+```
+Deletes and recreates `chroma_books/<book-id>` and reindexes chapters from `master_book.md`.
+
 ---
 
 ## How It Works
@@ -190,8 +243,8 @@ Every run executes in two phases:
 | Step | What happens |
 |------|-------------|
 | 7. RAG retrieval | Queries ChromaDB with the current story context to surface the most relevant past scenes |
-| 8. Chapter planning | A dedicated LLM call produces a full structural plan: opening hook, 3–5 scenes, thread advancement, character moment, conflict beat, revelations, ending hook, continuity traps |
-| 9. Chapter writing | Writes 1800–2500 words of prose using the plan, master bible, last 3 full chapters verbatim, and RAG context |
+| 8. Chapter planning | Two-pass planning: (a) full chapter plan, then (b) a "Chapter N Part 2" continuation plan for the same chapter number |
+| 9. Chapter writing | Writes prose in two passes (part 1 + part 2), then merges into one canonical chapter (`Chapter N`) |
 | 10. State update | Summarises the new chapter, updates world state JSON, indexes the new chapter into ChromaDB. Refreshes master bible every 5 chapters |
 
 ---
