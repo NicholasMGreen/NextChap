@@ -19,12 +19,14 @@ import sys
 import json
 import shutil
 import argparse
+import re
 from pathlib import Path
 from datetime import datetime
 
 
 BOOKS_ROOT  = Path("./novel_books")
 CHROMA_ROOT = Path("./chroma_books")
+RECENT_FULL_COUNT = 3
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -71,6 +73,139 @@ def _all_book_ids() -> list:
     if CHROMA_ROOT.exists():
         ids.update(p.name for p in CHROMA_ROOT.iterdir() if p.is_dir())
     return sorted(ids)
+
+
+_CHAPTER_HEADER_RE = re.compile(r"^##\s+Chapter\s+(\d+)\s*[:\-]?\s*(.*)$", re.IGNORECASE)
+_PROMO_LINE_RE = re.compile(
+    r"(patre\.?on|patreon\.com|chapters?\s+in\s+advance|^\s*\[?\d+\s+chapters?\s+in\s+advance\]?\s*$)",
+    re.IGNORECASE,
+)
+_DOTS_RE = re.compile(r"^\s*\.{3,}\s*$")
+
+
+def _is_removable_noise_line(line: str) -> bool:
+    s = line.strip()
+    if not s:
+        return False
+    if _PROMO_LINE_RE.search(s):
+        return True
+    if _DOTS_RE.match(s):
+        return True
+    return False
+
+
+def _normalize_header(line: str) -> str:
+    m = _CHAPTER_HEADER_RE.match(line.strip())
+    if not m:
+        return ""
+    num = int(m.group(1))
+    title = (m.group(2) or "").strip().lower()
+    title = re.sub(r"\s+", " ", title)
+    return f"{num}:{title}"
+
+
+def _clean_master_book_text(text: str) -> tuple[str, int, int]:
+    """
+    Returns (cleaned_text, removed_noise_lines, removed_duplicate_headers).
+    Duplicate headers are removed when they repeat before any substantive prose.
+    """
+    lines = text.splitlines()
+    out = []
+    removed_noise = 0
+    removed_dupes = 0
+
+    last_header_key = None
+    saw_substantive_since_header = False
+
+    for line in lines:
+        if _is_removable_noise_line(line):
+            removed_noise += 1
+            continue
+
+        header_key = _normalize_header(line)
+        if header_key:
+            if header_key == last_header_key and not saw_substantive_since_header:
+                removed_dupes += 1
+                continue
+            out.append(line)
+            last_header_key = header_key
+            saw_substantive_since_header = False
+            continue
+
+        out.append(line)
+        if line.strip():
+            saw_substantive_since_header = True
+
+    cleaned = "\n".join(out)
+    if text.endswith("\n"):
+        cleaned += "\n"
+    return cleaned, removed_noise, removed_dupes
+
+
+def _split_master_book(text: str) -> tuple[list[str], list[dict]]:
+    """Parse master_book markdown into frontmatter lines and chapter blocks."""
+    lines = text.splitlines()
+    frontmatter = []
+    chapters = []
+
+    cur_num = None
+    cur_title = ""
+    cur_lines = []
+    in_chapters = False
+
+    for line in lines:
+        m = _CHAPTER_HEADER_RE.match(line.strip())
+        if m:
+            in_chapters = True
+            if cur_num is not None:
+                chapters.append(
+                    {"number": cur_num, "title": cur_title, "content": "\n".join(cur_lines).strip()}
+                )
+            cur_num = int(m.group(1))
+            cur_title = (m.group(2) or "").strip() or f"Chapter {cur_num}"
+            cur_lines = []
+            continue
+
+        if not in_chapters:
+            frontmatter.append(line)
+        elif cur_num is not None:
+            cur_lines.append(line)
+
+    if cur_num is not None:
+        chapters.append({"number": cur_num, "title": cur_title, "content": "\n".join(cur_lines).strip()})
+
+    return frontmatter, chapters
+
+
+def _rebuild_master_book_text(frontmatter: list[str], chapters: list[dict]) -> str:
+    fm = list(frontmatter)
+    for i, line in enumerate(fm):
+        if line.strip().lower().startswith("chapters:"):
+            fm[i] = f"chapters: {len(chapters)}"
+
+    parts = []
+    if fm:
+        parts.append("\n".join(fm).rstrip())
+
+    for ch in chapters:
+        parts.append(f"## Chapter {ch['number']}: {ch['title']}\n\n{ch['content']}".rstrip())
+
+    return "\n\n".join(parts).rstrip() + "\n"
+
+
+def _safe_title_for_number(title: str, number: int) -> str:
+    if re.match(r"^chapter\s+\d+\s*$", title.strip(), re.IGNORECASE):
+        return f"Chapter {number}"
+    return title
+
+
+def _frontmatter_value(frontmatter: list[str], key: str) -> str:
+    prefix = f"{key.lower()}:"
+    for line in frontmatter:
+        s = line.strip()
+        if s.lower().startswith(prefix):
+            return s[len(prefix):].strip()
+    return ""
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -204,6 +339,182 @@ def cmd_delete(args):
     print(f"  Book '{bid}' has been fully removed.\n")
 
 
+def cmd_cleanup(args):
+    bid = args.book_id
+    book_root = BOOKS_ROOT / bid
+    master_path = book_root / "master_book.md"
+
+    if not book_root.exists():
+        print(f"Book '{bid}' not found.")
+        sys.exit(1)
+    if not master_path.exists():
+        print(f"No master_book.md found for '{bid}' at {master_path}.")
+        sys.exit(1)
+
+    original = master_path.read_text()
+    cleaned, removed_noise, removed_dupes = _clean_master_book_text(original)
+
+    if cleaned == original:
+        print(f"No cleanup needed for '{bid}'.")
+        return
+
+    if not args.no_backup:
+        backup = master_path.with_suffix(".md.bak")
+        backup.write_text(original)
+        print(f"  Backup saved: {backup}")
+
+    master_path.write_text(cleaned)
+    print(f"  Cleaned: {master_path}")
+    print(f"    Removed promo/noise lines      : {removed_noise}")
+    print(f"    Removed duplicate chapter heads: {removed_dupes}")
+    print()
+
+
+def cmd_rebuild_state(args):
+    bid = args.book_id
+    book_root = BOOKS_ROOT / bid
+    master_path = book_root / "master_book.md"
+    ch_sum_path = book_root / "chapter_summaries.json"
+    recent_path = book_root / "recent_chapters.json"
+    arc_path = book_root / "arc_summaries.json"
+    ws_path = book_root / "world_state.json"
+
+    if not book_root.exists() or not master_path.exists():
+        print(f"Book '{bid}' missing required files (master_book.md).")
+        sys.exit(1)
+
+    original_text = master_path.read_text()
+    frontmatter, chapters = _split_master_book(original_text)
+    if not chapters:
+        print("No chapters found in master_book.md; aborting.")
+        sys.exit(1)
+
+    original_numbers = [c["number"] for c in chapters]
+    changed_numbers = 0
+    if not args.no_renumber:
+        for idx, ch in enumerate(chapters, 1):
+            if ch["number"] != idx:
+                changed_numbers += 1
+            ch["number"] = idx
+            ch["title"] = _safe_title_for_number(ch["title"], idx)
+
+    rebuilt_text = _rebuild_master_book_text(frontmatter, chapters)
+    if not args.dry_run:
+        if not args.no_backup:
+            master_path.with_suffix(".md.pre_rebuild.bak").write_text(original_text)
+        master_path.write_text(rebuilt_text)
+
+    old_summaries = []
+    if ch_sum_path.exists():
+        try:
+            old_summaries = json.loads(ch_sum_path.read_text())
+        except Exception:
+            old_summaries = []
+
+    new_summaries = []
+    for i, ch in enumerate(chapters):
+        summary = old_summaries[i]["summary"] if i < len(old_summaries) and isinstance(old_summaries[i], dict) else ""
+        new_summaries.append({"number": ch["number"], "title": ch["title"], "summary": summary})
+
+    recent = []
+    for ch, s in zip(chapters[-RECENT_FULL_COUNT:], new_summaries[-RECENT_FULL_COUNT:]):
+        recent.append(
+            {"number": ch["number"], "title": ch["title"], "content": ch["content"], "summary": s["summary"]}
+        )
+
+    if ws_path.exists():
+        try:
+            ws = json.loads(ws_path.read_text())
+        except Exception:
+            ws = {}
+    else:
+        ws = {}
+    ws["chapter_count"] = len(chapters)
+
+    if arc_path.exists():
+        try:
+            arc_data = json.loads(arc_path.read_text())
+            if not isinstance(arc_data, list):
+                arc_data = []
+        except Exception:
+            arc_data = []
+    else:
+        arc_data = []
+
+    if not args.dry_run:
+        ch_sum_path.write_text(json.dumps(new_summaries, indent=2))
+        recent_path.write_text(json.dumps(recent, indent=2))
+        ws_path.write_text(json.dumps(ws, indent=2))
+        arc_path.write_text(json.dumps(arc_data, indent=2))
+
+    print(f"  Rebuilt state for '{bid}'")
+    print(f"    Chapters in master_book : {len(chapters)}")
+    if not args.no_renumber:
+        print(f"    Chapter numbers fixed   : {changed_numbers}")
+    print(f"    world_state.chapter_count -> {len(chapters)}")
+    if args.dry_run:
+        print("    (dry-run mode: no files written)")
+    print()
+
+
+def cmd_reconvert_epub(args):
+    bid = args.book_id
+    book_root = BOOKS_ROOT / bid
+    master_path = book_root / "master_book.md"
+    if not book_root.exists() or not master_path.exists():
+        print(f"Book '{bid}' missing required file: {master_path}")
+        sys.exit(1)
+
+    try:
+        import novel_generator as ng
+    except Exception as exc:
+        print("Could not import novel_generator.py dependencies.")
+        print(f"  Details: {exc}")
+        print("Run from the same environment you use for novel generation.")
+        sys.exit(1)
+
+    master_text = master_path.read_text()
+    frontmatter, _ = _split_master_book(master_text)
+    chapters = ng.parse_markdown_book(master_text)
+    if not chapters:
+        print("No chapters found in master_book.md; cannot build EPUB.")
+        sys.exit(1)
+
+    source_name = _frontmatter_value(frontmatter, "source")
+    default_stem = Path(source_name).stem if source_name else bid
+    out_path = Path(args.output) if args.output else (book_root / f"{default_stem}_with_generated.epub")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    source_candidate = Path(source_name) if source_name else None
+    if source_candidate and not source_candidate.is_absolute():
+        source_candidate = Path.cwd() / source_candidate
+
+    template_path = None
+    if args.template:
+        template_path = Path(args.template)
+    elif source_candidate and source_candidate.exists():
+        template_path = source_candidate
+    else:
+        merged_candidate = book_root / f"{default_stem}_with_generated.epub"
+        if merged_candidate.exists():
+            template_path = merged_candidate
+
+    if not template_path or not template_path.exists():
+        print("Could not locate an EPUB template to preserve metadata/structure.")
+        print("Provide one explicitly with --template /path/to/original.epub")
+        sys.exit(1)
+
+    handler = ng.EpubHandler()
+    _, original_book = handler.read(str(template_path))
+    handler.write(original_book, chapters, str(out_path))
+
+    print(f"  Reconverted EPUB saved:")
+    print(f"    {out_path.resolve()}")
+    print(f"    Chapters: {len(chapters)}")
+    print(f"    Template: {template_path}")
+    print()
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -216,6 +527,9 @@ def main():
             "  python book_manager.py info my_story\n"
             "  python book_manager.py delete my_story\n"
             "  python book_manager.py delete my_story --yes\n"
+            "  python book_manager.py cleanup my_story\n"
+            "  python book_manager.py rebuild-state my_story\n"
+            "  python book_manager.py reconvert-epub my_story\n"
         ),
     )
 
@@ -230,8 +544,30 @@ def main():
     p_del.add_argument("book_id", help="Book ID (slug)")
     p_del.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
 
+    p_clean = sub.add_parser("cleanup", help="Clean master_book.md (duplicate headers + promo lines)")
+    p_clean.add_argument("book_id", help="Book ID (slug)")
+    p_clean.add_argument("--no-backup", action="store_true", help="Do not write master_book.md.bak")
+
+    p_rebuild = sub.add_parser("rebuild-state", help="Rebuild session state from master_book.md")
+    p_rebuild.add_argument("book_id", help="Book ID (slug)")
+    p_rebuild.add_argument("--no-renumber", action="store_true", help="Keep existing chapter numbers")
+    p_rebuild.add_argument("--no-backup", action="store_true", help="Do not write master_book.md.pre_rebuild.bak")
+    p_rebuild.add_argument("--dry-run", action="store_true", help="Show results without writing files")
+
+    p_epub = sub.add_parser("reconvert-epub", help="Build a fresh EPUB from master_book.md")
+    p_epub.add_argument("book_id", help="Book ID (slug)")
+    p_epub.add_argument("--output", help="Output EPUB path (default: novel_books/<id>/<source>_with_generated.epub)")
+    p_epub.add_argument("--template", help="Template EPUB path (metadata/structure source)")
+
     args = ap.parse_args()
-    {"list": cmd_list, "info": cmd_info, "delete": cmd_delete}[args.command](args)
+    {
+        "list": cmd_list,
+        "info": cmd_info,
+        "delete": cmd_delete,
+        "cleanup": cmd_cleanup,
+        "rebuild-state": cmd_rebuild_state,
+        "reconvert-epub": cmd_reconvert_epub,
+    }[args.command](args)
 
 
 if __name__ == "__main__":
