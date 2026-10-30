@@ -1,298 +1,166 @@
-# Novel Chapter Generator
+# NextChap
 
-Generates new web novel chapters from an existing `.epub` or `.txt` file using:
-- **DeepSeek V3** via OpenRouter (generation + planning)
-- **LlamaIndex + ChromaDB** (local RAG vector store, persists between runs)
-- **BAAI/bge-large-en-v1.5** (local embeddings, no API key needed)
-- **ebooklib + lxml + BeautifulSoup4** (EPUB read/write with guaranteed Unicode fidelity)
+Continue a web novel from an existing `.epub` or `.txt`. NextChap builds a long-term memory of the story, then plans, writes, checks and commits new chapters. It runs entirely in the terminal.
 
----
+- **Writer:** Claude Haiku 5.5 with thinking off. **Planner and analyst:** DeepSeek V4.1 Flash. All calls go through [OpenRouter](https://openrouter.ai), and each model falls back to the other.
+- **Story memory:**
+  - chapter and arc summaries;
+  - a structured world state with stable character and thread IDs, plus a snapshot per chapter;
+  - an editable story bible and style guide.
+- **Retrieval:** local Qwen3 embeddings with hybrid dense + BM25 search over scene-sized chunks, so exact names like "Azure Dragon Fist" are found.
+- **Safety and quality:** a crash-safe, resumable commit journal, a spend cap, and a continuity critic that can revise flagged scenes.
+- **Output:** EPUB that keeps the original cover and metadata and adds a proper table of contents.
 
-## Requirements
-
-- macOS (Apple Silicon or Intel)
-- Python 3.10 or newer
-- An [OpenRouter](https://openrouter.ai) API key with DeepSeek V3 access
-
-Check your Python version:
-```bash
-python3 --version
-```
-
-If you need to install Python, the easiest way on Mac is via [Homebrew](https://brew.sh):
-```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-brew install python@3.11
-```
+Typical cost is **about $0.01 per generated chapter** and **about $0.25 to import a 500-chapter book**. Prices come live from OpenRouter, and `--dry-run` shows the estimate before you spend anything.
 
 ---
 
-## Setup
+## Install
 
-### 1. Create and activate a virtual environment
+You need Linux or macOS, Python 3.12+, [uv](https://docs.astral.sh/uv/), and an OpenRouter API key.
+
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+git clone <this repo> && cd NextChap
+uv tool install ".[local-embed]"       # installs the `nextchap` command
+# or, for development: uv sync --extra local-embed && uv run nextchap --help
+
+export OPENROUTER_API_KEY=sk-or-...    # or put it in .env, or: nextchap config set-key
+nextchap doctor                        # checks key, credits, models, embeddings, disk
 ```
 
-You will need to run `source venv/bin/activate` again any time you open a new terminal window.
+`local-embed` pulls in PyTorch, and the embedding model (about 1.2 GB) downloads on first use. For a light install without torch, skip the extra and use remote embeddings:
 
-### 2. Install dependencies
 ```bash
-pip install -r requirements.txt
+uv tool install .
+nextchap config set retrieval.embed_backend remote
 ```
 
-The first install will take a few minutes. The embedding model (~1.3 GB) downloads automatically on first run.
+## Quick start
 
-### 3. Set your OpenRouter API key
 ```bash
-export OPENROUTER_API_KEY=sk-or-xxxx
+nextchap import my_novel.epub --book-id my_story   # shows detected chapters + cost, then builds memory
+nextchap generate my_story -n 3                     # plans, writes, checks and commits 3 chapters
+nextchap books info my_story                        # overview, world state, total spend
 ```
 
-To avoid setting this every session, add it to your shell profile:
-```bash
-echo 'export OPENROUTER_API_KEY=sk-or-xxxx' >> ~/.zshrc
-source ~/.zshrc
+While it runs you see a progress bar for each phase, a live preview of the prose as it streams, and a footer with spend, tokens, and cache hit rate. Press Ctrl-C once to stop at the next safe point, or twice to abort. Re-running the same command resumes from the last completed step, whether you stopped it yourself or it crashed.
+
+Useful flags:
+
+| Flag | Effect |
+|---|---|
+| `--dry-run` | Show the planned calls, tokens and cost; spend nothing |
+| `--max-cost 0.50` | Never spend past this; stops between chapters when the next one would exceed it |
+| `--review` | Approve, edit in `$EDITOR`, or regenerate each plan and each chapter |
+| `--no-critic` | Skip the continuity check |
+| `--no-preview` | Hide the streaming preview |
+| `--plain` | Plain log lines (automatic when output isn't a terminal) |
+| `--json` | Machine-readable output for `books list/info`, `state show`, `models`, `doctor`, `config show` |
+
+## Commands
+
+```
+nextchap import FILE [--book-id ID] [--dry-run] [--yes] [--force] [--max-cost N]
+nextchap generate BOOK [-n N] [--max-cost N] [--review] [--dry-run] [--no-critic] [--no-epub]
+nextchap books list | info BOOK | delete BOOK [--yes]
+nextchap clean BOOK [--no-backup]                 # strip promo lines / duplicate headers
+nextchap state show BOOK [--chapter N] | diff BOOK [--from A --to B]
+nextchap state rollback BOOK --to N [--truncate]  # undo world-state (and chapters) after N
+nextchap state rebuild BOOK [--no-renumber] [--dry-run]
+nextchap index rebuild BOOK                       # re-embed (local, no API cost)
+nextchap export epub BOOK [-o PATH] [--template EPUB] [--check]
+nextchap models [--refresh]                       # model per role, live price, availability
+nextchap doctor
+nextchap config show | path | set KEY VALUE [--project] | set-key
+nextchap migrate [--from DIR] [--move]            # bring over 1.x ./novel_books data
 ```
 
----
+Shell completion (including book IDs): `nextchap --install-completion`.
 
-## Generating Chapters
+## Configuration
 
-### Basic usage
-```bash
-python3 novel_generator.py my_novel.epub 3
+Settings are layered, highest priority first: CLI flags, `NEXTCHAP_*` environment variables (nested with `__`, e.g. `NEXTCHAP_GENERATION__MIN_WORDS=1200`), `.env`, `./nextchap.toml`, then the user config (`nextchap config path`). Example `nextchap.toml`:
+
+```toml
+[generation]
+target_words = [1800, 2400]
+min_words = 1200
+max_cost = 1.00          # default --max-cost
+scene_separator = "* * *" # "" joins scenes without a break
+
+[models.writer]
+model = "anthropic/claude-haiku-5.5"
+reasoning = "none"       # keep thinking off for prose
+max_tokens = 6000
+fallbacks = ["deepseek/deepseek-v4.1-flash-1017"]
+
+[retrieval]
+embed_backend = "local"  # local | remote
+embed_model = "Qwen/Qwen3-Embedding-0.6B"
+rerank = false           # true needs: uv tool install ".[local-embed,rerank]"
+
+[cleanup]
+extra_noise_patterns = ["^translator'?s note"]
 ```
 
-### With a custom book ID (recommended)
-```bash
-python3 novel_generator.py my_novel.epub 5 --book-id cultivation_story
+Any OpenRouter model ID works for any role. The client reads each model's supported parameters from OpenRouter and only sends what that model accepts. Changing `retrieval.embed_model` means you need to run `nextchap index rebuild`; NextChap detects the mismatch and offers to do it.
+
+## How it works
+
+**Import** (once per book). NextChap first detects chapters, using heading structure and number continuity so that prose lines like `3. He ran…` aren't mistaken for headings. It then removes promo noise and shows you the result before spending anything. After you confirm, it:
+
+1. summarizes every chapter;
+2. builds arc summaries;
+3. extracts a structured world state;
+4. writes a story bible;
+5. indexes scene chunks.
+
+**Each new chapter.** Every step is journaled under `staging/`:
+
+1. **Plan:** a structured scene plan with beats, thread IDs, and an ending hook.
+2. **Write:** scene by scene, streaming. The stable context (style, bible, world state, recent chapters) is prompt-cached across scenes. Each scene also gets hybrid-retrieved past scenes.
+3. **Check:** local checks for length, repetition and banned phrases, plus an independent critic pass. Scenes with major issues are rewritten once.
+4. **Analyze:** summary plus a validated world-state delta, applied to a copy and rejected if it would lose data.
+5. **Commit:** written in a fixed order: `master_book.md`, then world state, then index, then summaries, then `book.json`. Every write is atomic, and a file lock prevents two runs on one book.
+
+`master_book.md` is the source of truth. You can edit any chapter or append chapters by hand. On the next run, changed chapters are re-summarized and re-indexed, and appended chapters are folded into the world state.
+
+## Files
+
+Books live in the data directory (`nextchap config path`; override with `--data-dir` or `NEXTCHAP_HOME`):
+
+```
+books/<book-id>/
+  master_book.md            canonical text of every chapter (edit freely)
+  style.md                  style guide sent with every writing request (edit freely)
+  master_bible.md           story bible (edit freely; refreshed every 5 chapters)
+  world_state.json          characters, threads (t001…), rules, locations, factions, hook
+  world_state_history/      snapshot after every chapter (used by state diff/rollback)
+  chapter_summaries.json, arc_summaries.json, book.json, usage.jsonl (per-call cost log)
+  generated_chapters/       chapter_NNNN.md, _plan.md, _critic.json
+  <source>_with_generated.epub
+  index/                    vector index
+logs/nextchap.log           full debug log (tracebacks land here)
 ```
 
-Using `--book-id` lets you give the book a memorable name and pick up where you left off in future sessions.
+## Upgrading from 1.x
 
-### Continue generating more chapters for the same book
-```bash
-python3 novel_generator.py my_novel.epub 5 --book-id cultivation_story
-```
-Run the same command again — the script detects the existing index and resumes from the last generated chapter automatically.
-
-### Pass the API key inline instead of via env var
-```bash
-python3 novel_generator.py my_novel.epub 3 --api-key sk-or-xxxx
-```
-
-### TXT input is also supported
-```bash
-python3 novel_generator.py my_novel.txt 3 --book-id cultivation_story
-```
-
----
-
-## Input Format
-
-### EPUB (recommended)
-Any standard `.epub` file. The script reads chapters in spine order, skips short navigation pages, and detects chapter headers automatically. On EPUB import it now also cleans common junk from source text:
-- duplicate chapter headers repeated back-to-back
-- promo lines (Patreon links / "chapters in advance" style lines)
-- dot-separator noise lines (`.....`)
-
-The output is a new EPUB file with the generated chapters appended — the original is never modified.
-
-### TXT
-The `.txt` file should have chapter headers in any common format:
-```
-Chapter 1: The Beginning
-...chapter text...
-
-Chapter 2 - The Journey
-...chapter text...
-
-CHAPTER 3
-...chapter text...
-```
-
----
-
-## Output
-
-### EPUB output (when input is EPUB)
-```
-novel_books/
-  <book-id>/
-    <original_name>_with_generated.epub    ← your original book + new chapters
-```
-
-Open this in any EPUB reader (Apple Books, Calibre, etc.).
-
-### All output files
-```
-novel_books/
-  <book-id>/
-    <original>_with_generated.epub         ← full EPUB with new chapters appended
-    master_bible.md                        ← canon reference document (edit freely)
-    world_state.json                       ← live character/plot/lore state (edit freely)
-    generated_chapters_combined.md         ← all new chapters in one markdown file
-    generated_chapters/
-      chapter_0001_plan.md                 ← AI's structural plan (useful for debugging)
-      chapter_0001.md                      ← generated chapter prose
-      chapter_0002_plan.md
-      chapter_0002.md
-      ...
-
-chroma_books/
-  <book-id>/                               ← vector embeddings (managed automatically)
-```
-
----
-
-## Managing Books
-
-All book management is handled by `book_manager.py`.
-
-### List all books
-```bash
-python3 book_manager.py list
-```
-Shows every book with its chapter count, how many chapters have been generated, disk usage, and last modified date.
-
-### Detailed info for a specific book
-```bash
-python3 book_manager.py info cultivation_story
-```
-Shows world state details: active characters, plot threads, last chapter hook, current arc, and disk usage.
-
-### Delete a book (with confirmation prompt)
-```bash
-python3 book_manager.py delete cultivation_story
-```
-Permanently removes everything — the `novel_books/<id>` folder and the `chroma_books/<id>` vector store. You will be asked to type `yes` to confirm before anything is deleted.
-
-### Delete a book without being prompted
-```bash
-python3 book_manager.py delete cultivation_story --yes
-```
-
-### Cleanup an existing master book
-```bash
-python3 book_manager.py cleanup cultivation_story
-```
-Removes duplicated chapter headers and common promo/noise lines from `master_book.md`.
-
-Optional:
-```bash
-python3 book_manager.py cleanup cultivation_story --no-backup
-```
-
-### Rebuild state files from `master_book.md`
-```bash
-python3 book_manager.py rebuild-state cultivation_story
-```
-Re-parses chapters from `master_book.md` and rewrites:
-- `chapter_summaries.json`
-- `recent_chapters.json`
-- `world_state.json` (`chapter_count` corrected)
-- keeps `arc_summaries.json` valid JSON
-
-Useful when chapter numbers drift (for example if generated chapters started at the wrong number).
-
-Options:
-```bash
-python3 book_manager.py rebuild-state cultivation_story --dry-run
-python3 book_manager.py rebuild-state cultivation_story --no-renumber
-python3 book_manager.py rebuild-state cultivation_story --no-backup
-```
-
-### Reconvert `master_book.md` into EPUB
-```bash
-python3 book_manager.py reconvert-epub cultivation_story
-```
-Builds a fresh `<source>_with_generated.epub` from `master_book.md` using `novel_generator.py` EPUB conversion logic.
-
-Options:
-```bash
-python3 book_manager.py reconvert-epub cultivation_story --output novel_books/cultivation_story/custom.epub
-python3 book_manager.py reconvert-epub cultivation_story --template /path/to/original.epub
-```
-
-### Rebuild ChromaDB for a book
-```bash
-python3 book_manager.py rebuild-chroma cultivation_story
-```
-Deletes and recreates `chroma_books/<book-id>` and reindexes chapters from `master_book.md`.
-
----
-
-## How It Works
-
-Every run executes in two phases:
-
-### Phase 1 — Analyse the existing novel (runs once per book)
-
-| Step | What happens |
-|------|-------------|
-| 1. Parse | Detects chapter headers and splits the file into individual chapters |
-| 2. Chapter summaries | Every chapter gets a 150–250 word dense summary capturing characters, actions, power progression, and hooks |
-| 3. Arc summaries | Every 20 chapters are grouped into a 500–700 word arc-level summary |
-| 4. World state | Builds a live JSON file tracking characters, active/resolved plot threads, world rules, factions, key items, and the last chapter's hook |
-| 5. Master bible | Synthesizes everything into a 1000–1800 word canon reference document |
-| 6. Vector index | All chapters are embedded and stored locally in ChromaDB |
-
-### Phase 2 — Generate N chapters (loops per chapter)
-
-| Step | What happens |
-|------|-------------|
-| 7. RAG retrieval | Queries ChromaDB with the current story context to surface the most relevant past scenes |
-| 8. Chapter planning | Two-pass planning: (a) full chapter plan, then (b) a "Chapter N Part 2" continuation plan for the same chapter number |
-| 9. Chapter writing | Writes prose in two passes (part 1 + part 2), then merges into one canonical chapter (`Chapter N`) |
-| 10. State update | Summarises the new chapter, updates world state JSON, indexes the new chapter into ChromaDB. Refreshes master bible every 5 chapters |
-
----
-
-## Tips
-
-**The ChromaDB index persists between runs.** The first run for a large novel (e.g. 300 chapters) will take a while to summarise and index everything. Every subsequent run for that book-id reuses the existing index and only processes new chapters.
-
-**Edit `world_state.json` manually** to fix any character or lore details the AI got wrong during extraction. This file is the live source of truth the generator reads every chapter.
-
-**Edit `master_bible.md` manually** to inject author intent, stylistic notes, or plot directions you want the generator to follow. It is reread every generation run.
-
-**Inspect `chapter_XXXX_plan.md`** before reading a generated chapter. The plan shows the AI's structural reasoning and is the first place to look if a chapter feels off — the fix is usually to edit the plan and regenerate.
-
-**Increase `TARGET_WORDS`** in `novel_generator.py` (line near the top) if you want longer chapters:
-```python
-TARGET_WORDS = (2500, 3500)
-```
-
----
-
-## Cost Estimate
-
-DeepSeek V3 on OpenRouter costs approximately **$0.27 / million input tokens** and **$1.10 / million output tokens**.
-
-| Novel size | Initial load | Per new chapter | 10 new chapters |
-|---|---|---|---|
-| 50 chapters | ~$0.15 | ~$0.04 | ~$0.55 |
-| 200 chapters | ~$0.60 | ~$0.06 | ~$1.20 |
-| 500 chapters | ~$1.50 | ~$0.08 | ~$2.30 |
-
-The initial load cost is a one-time cost per book. Subsequent sessions for the same book-id skip re-summarisation and cost only the per-chapter rate.
-
----
+Run `nextchap migrate` in the old project folder. It copies `./novel_books/*` into the data directory. The world state, arc summaries and metadata are upgraded on first use, with the old world state kept as `world_state.v0.json`. The index is rebuilt locally because the embedding model changed. `python3 novel_generator.py …` and `python3 book_manager.py …` still work for one release and print the equivalent new command.
 
 ## Troubleshooting
 
-**`command not found: python3`**
-Install Python via Homebrew: `brew install python@3.11`
+- **`doctor` says the API key failed:** check `OPENROUTER_API_KEY`. HTTP 402 means you're out of credits (top up at openrouter.ai).
+- **Empty answers or "spent on hidden reasoning":** lower the role's `reasoning` setting (`none` or `low`).
+- **The model refuses dark content:** point the writer role at another model, e.g. `nextchap config set models.writer.model deepseek/deepseek-v4.1-flash-1017`. A content-filter refusal is automatically retried once on the fallback model.
+- **"Book is locked":** another `nextchap` process is working on that book.
+- **Wrong chapter splits:** look at the anomalies list in `import --dry-run`. Fix the source or `master_book.md`, then run `nextchap state rebuild`.
 
-**`ModuleNotFoundError`**
-Make sure your virtual environment is active: `source venv/bin/activate`, then re-run `pip install -r requirements.txt`
+## Development
 
-**Embedding model download is slow**
-The BAAI/bge-large-en-v1.5 model is ~1.3 GB and only downloads once. It is cached by HuggingFace in `~/.cache/huggingface/`.
+```bash
+uv sync                      # dev tools included
+uv run pytest                # no network; uses a fake model client and hash embeddings
+uv run ruff check . && uv run ruff format --check . && uv run mypy
+```
 
-**EPUB output looks wrong in Apple Books**
-Open the file in [Calibre](https://calibre-ebook.com) first and run "Check Book" to see if there are any structural issues. The ebooklib output is valid EPUB3 but some readers are stricter than others.
-
-**API rate limit errors**
-The script automatically retries with exponential backoff (up to 3 attempts). If you are hitting persistent rate limits, add a delay between chapter generations by increasing the sleep time in `LLMClient.complete()`.
+See `AGENTS.md` for architecture notes and `docs/MODERNIZATION_PLAN.md` for the design rationale.

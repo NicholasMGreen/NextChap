@@ -18,3 +18,13 @@ chroma_books/
 novel_books/
 *_with_generated.epub
 *.epub
+
+# Secrets and local config
+.env
+nextchap.toml
+
+# Build / test artifacts
+dist/
+build/
+.coverage
+htmlcov/
