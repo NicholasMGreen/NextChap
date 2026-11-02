@@ -25,7 +25,7 @@ def overview_rows(app_ctx: AppContext) -> list[dict[str, Any]]:
 
 
 def overview_table(rows: list[dict[str, Any]]) -> Table:
-    table = Table(show_edge=False)
+    table = Table(show_edge=False, header_style="bold cyan", border_style="cyan")
     for col, just in (
         ("Book ID", "left"),
         ("Chapters", "right"),

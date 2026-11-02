@@ -7,6 +7,10 @@ runs generation or writes book files itself.
 
 from __future__ import annotations
 
+from typing import Any
+
+from rich.console import Group
+from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.table import Table
 from rich.text import Text
@@ -17,28 +21,51 @@ from nextchap.cli.resolve import available_books
 from nextchap.cli.ui import money
 
 
+def _book_panel(rows: list[dict[str, Any]], count: int) -> Panel:
+    total_spend = sum(float(row["total_spend"]) for row in rows)
+    header = Text.assemble(
+        (f"{count} book{'s' if count != 1 else ''}", "bold"),
+        " · ",
+        (money(total_spend), "bold"),
+        " total spend",
+    )
+    return Panel(
+        Group(header, overview_table(rows)),
+        title="NextChap",
+        border_style="cyan",
+        expand=False,
+    )
+
+
+def _action_panel(chosen: str, actions: list[str]) -> Panel:
+    action_table = Table(show_header=False, box=None, pad_edge=False)
+    action_table.add_column("#", justify="right", style="dim")
+    action_table.add_column("Action")
+    for i, label in enumerate(actions, 1):
+        action_table.add_row(str(i), label)
+    return Panel(action_table, title=chosen, border_style="cyan", expand=False)
+
+
 def run_menu(app_ctx: AppContext) -> list[str] | None:
     """Show the menu and return an argv tail for the chosen command, or None."""
     ids = available_books(app_ctx.settings)
     if not ids:
         app_ctx.err.print(
-            Text.assemble(
-                ("No books yet. ", "bold"),
-                "Start with ",
-                ("nextchap import <file>", "bold cyan"),
-                ".",
+            Panel(
+                Text.assemble(
+                    ("No books yet. ", "bold"),
+                    "Start with ",
+                    ("nextchap import <file>", "bold cyan"),
+                    ".",
+                ),
+                title="NextChap",
+                border_style="cyan",
+                expand=False,
             )
         )
         return None
     rows = overview_rows(app_ctx)
-    total_spend = sum(float(row["total_spend"]) for row in rows)
-    app_ctx.err.print(
-        Text.assemble(
-            ("NextChap", "bold"),
-            f" — {len(ids)} book{'s' if len(ids) != 1 else ''} · {money(total_spend)} total spend",
-        )
-    )
-    app_ctx.err.print(overview_table(rows))
+    app_ctx.err.print(_book_panel(rows, len(ids)))
 
     def choose_book() -> str:
         if len(ids) == 1:
@@ -62,13 +89,7 @@ def run_menu(app_ctx: AppContext) -> list[str] | None:
         "quit",
     ]
     while True:
-        app_ctx.err.print(Text(f"Book: {chosen}", style="dim"))
-        action_table = Table(show_header=False, box=None, pad_edge=False)
-        action_table.add_column("#", justify="right", style="dim")
-        action_table.add_column("Action")
-        for i, label in enumerate(actions, 1):
-            action_table.add_row(str(i), label)
-        app_ctx.err.print(action_table)
+        app_ctx.err.print(_action_panel(chosen, actions))
         answer = Prompt.ask(
             "Action",
             choices=[str(i) for i in range(1, len(actions) + 1)],
@@ -94,7 +115,7 @@ def run_menu(app_ctx: AppContext) -> list[str] | None:
         if choice == 4:
             return ["export", chosen]
         if choice == 5:
-            app_ctx.err.print(overview_table(rows))
+            app_ctx.err.print(_book_panel(rows, len(ids)))
             chosen = choose_book()
             continue
         return None
