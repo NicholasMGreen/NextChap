@@ -14,7 +14,6 @@ from nextchap.retrieval.embed import HashEmbedder
 from nextchap.retrieval.store import VectorStore, chunk_chapter
 from nextchap.storage.atomic import atomic_write_json, read_json
 from nextchap.storage.lock import book_lock
-from nextchap.storage.migrate import find_legacy, migrate
 from nextchap.storage.paths import book_paths, slugify, validate_book_id
 
 
@@ -45,21 +44,6 @@ def test_lock_is_exclusive(tmp_path: Path) -> None:
     lock = tmp_path / ".lock"
     with book_lock(lock), pytest.raises(BookLocked), book_lock(lock):
         pass
-
-
-def test_migrate_legacy_layout(tmp_path: Path) -> None:
-    old = tmp_path / "proj" / "novel_books" / "My Story"
-    old.mkdir(parents=True)
-    (old / "master_book.md").write_text("---\nsource: my.epub\n---\n\n## Chapter 1: A\n\nText\n")
-    (old / "recent_chapters.json").write_text("[]")
-    (tmp_path / "proj" / "my.epub").write_bytes(b"epub")
-    assert len(find_legacy(tmp_path / "proj")) == 1
-    results = migrate(tmp_path / "proj", tmp_path / "data")
-    assert [(r.book_id, r.status) for r in results] == [("my_story", "migrated")]
-    dest = tmp_path / "data" / "books" / "my_story"
-    assert (dest / "master_book.md").exists() and (dest / "template.epub").exists()
-    assert not (dest / "recent_chapters.json").exists()
-    assert migrate(tmp_path / "proj", tmp_path / "data")[0].status == "exists"
 
 
 def test_fit_text_and_items() -> None:

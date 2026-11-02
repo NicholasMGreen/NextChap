@@ -1,4 +1,4 @@
-"""`models`, `doctor`, `config`, `migrate`, and world-state renderers."""
+"""`models`, `doctor`, `config`, and world-state renderers."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import httpx
 import typer
 from pydantic import ValidationError
 from rich.panel import Panel
-from rich.prompt import Confirm, Prompt
+from rich.prompt import Prompt
 from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
@@ -28,7 +28,6 @@ from nextchap.config import (
 )
 from nextchap.errors import ConfigError
 from nextchap.memory.world_state import WorldState
-from nextchap.storage.migrate import LEGACY_BOOKS, find_legacy, migrate
 
 JsonOpt = Annotated[bool, typer.Option("--json", help="Machine-readable output on stdout.")]
 
@@ -299,9 +298,6 @@ def doctor_cmd(ctx: typer.Context, as_json: JsonOpt = False) -> None:
         "ok" if shutil.which("epubcheck") else "info",
         "available" if shutil.which("epubcheck") else "optional; enables `export epub --check`",
     )
-    if find_legacy(Path.cwd()):
-        add("Legacy data", "warn", f"./{LEGACY_BOOKS} found; run `nextchap migrate`")
-
     if as_json:
         app_ctx.out.print_json(json.dumps(checks))
     else:
@@ -415,46 +411,7 @@ def config_set_key(ctx: typer.Context) -> None:
     app_ctx.err.print(f"[green]✓[/] Stored {_mask(secret)} in the OS keyring.")
 
 
-def migrate_cmd(
-    ctx: typer.Context,
-    from_dir: Annotated[
-        Path, typer.Option("--from", help="Folder containing novel_books/.")
-    ] = Path(),
-    move: Annotated[
-        bool, typer.Option("--move", help="Delete the old folders after copying.")
-    ] = False,
-    yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
-) -> None:
-    """Move 1.x books (./novel_books) into the data directory."""
-    app_ctx = _app_ctx(ctx)
-    found = find_legacy(from_dir.resolve())
-    if not found:
-        app_ctx.err.print(f"No 1.x books found in {from_dir.resolve() / LEGACY_BOOKS}.")
-        return
-    app_ctx.err.print(f"Found {len(found)} book(s): {', '.join(p.name for p in found)}")
-    app_ctx.err.print(f"Destination: {app_ctx.settings.data_root / 'books'}")
-    if not yes and not Confirm.ask(
-        "Migrate them?" + (" (old folders are deleted)" if move else ""),
-        default=True,
-        console=app_ctx.err,
-    ):
-        raise typer.Exit(1)
-    results = migrate(from_dir.resolve(), app_ctx.settings.data_root, copy=not move)
-    t = Table(show_edge=False)
-    t.add_column("Old ID")
-    t.add_column("Book ID")
-    t.add_column("Result")
-    for r in results:
-        t.add_row(r.legacy_id, r.book_id, r.status)
-    app_ctx.err.print(t)
-    app_ctx.err.print(
-        "World state and summaries are upgraded on first use. The retrieval index is "
-        "rebuilt locally on the next run (no API cost)."
-    )
-
-
 def register(app: typer.Typer) -> None:
     app.command("models")(models_cmd)
     app.command("doctor")(doctor_cmd)
-    app.command("migrate")(migrate_cmd)
     app.add_typer(config_app, name="config")

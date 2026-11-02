@@ -27,7 +27,8 @@ class QwenReranker:
             ) from exc
         self._torch: Any = torch
         self._tok: Any = AutoTokenizer.from_pretrained(model_name, padding_side="left")
-        self._model: Any = AutoModelForCausalLM.from_pretrained(model_name).eval()
+        model: Any = AutoModelForCausalLM.from_pretrained(model_name)
+        self._model = model.eval()
         self._yes = self._tok.convert_tokens_to_ids("yes")
         self._no = self._tok.convert_tokens_to_ids("no")
         self._max = max_length

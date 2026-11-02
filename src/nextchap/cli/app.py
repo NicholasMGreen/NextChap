@@ -37,7 +37,6 @@ from nextchap.pipeline.engine import export_epub as write_book_epub
 from nextchap.pipeline.estimate import EstimateRow, estimate_generation, estimate_import, total
 from nextchap.retrieval.context import estimate_tokens
 from nextchap.storage.lock import book_lock
-from nextchap.storage.migrate import find_legacy
 from nextchap.storage.paths import all_book_ids, slugify, validate_book_id
 
 log = logging.getLogger("nextchap")
@@ -93,7 +92,11 @@ def root(
     ctx: typer.Context,
     data_dir: Annotated[
         Path | None,
-        typer.Option("--data-dir", envvar="NEXTCHAP_HOME", help="Where books are stored."),
+        typer.Option(
+            "--data-dir",
+            envvar="NEXTCHAP_HOME",
+            help="Data root; books go into <root>/novel_books (default: the project directory).",
+        ),
     ] = None,
     verbose: Annotated[
         int, typer.Option("-v", "--verbose", count=True, help="-v info, -vv debug.")
@@ -106,11 +109,6 @@ def root(
     app_ctx = AppContext(data_dir=data_dir, verbose=verbose, plain=plain)
     ctx.obj = app_ctx
     app_ctx.setup_logging()
-    if ctx.invoked_subcommand not in ("migrate", "doctor", "config") and find_legacy(Path.cwd()):
-        app_ctx.err.print(
-            "[yellow]![/] Found 1.x book data in ./novel_books. "
-            "Run [bold]nextchap migrate[/] to move it into the new data directory."
-        )
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -680,9 +678,18 @@ def main(argv: list[str] | None = None) -> int:
         if isinstance(exc, click.exceptions.Abort):
             err.print("[yellow]Aborted.[/]")
             return 1
-        if isinstance(exc, click.ClickException):
+        click_exc: tuple[type[Any], ...] = (click.ClickException,)
+        try:
+            # Typer >= 0.20 vendors its own click, so its UsageError does not
+            # subclass the installed click's ClickException.
+            import typer._click as _typer_click
+
+            click_exc = (click.ClickException, _typer_click.ClickException)
+        except ImportError:
+            pass
+        if isinstance(exc, click_exc):
             exc.show()
-            return exc.exit_code
+            return int(exc.exit_code)
         log.exception("Unexpected error")
         log_file = next(
             (

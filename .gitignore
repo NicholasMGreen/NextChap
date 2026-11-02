@@ -28,3 +28,6 @@ dist/
 build/
 .coverage
 htmlcov/
+
+# CLI logs (data root is the project directory)
+logs/

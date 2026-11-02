@@ -88,6 +88,7 @@ class RichReporter:
         self.show_preview = show_preview
         self.min_words = settings.generation.min_words
         self.preview_text = ""
+        self._preview_newlines = 0
         self.progress = Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -168,11 +169,19 @@ class RichReporter:
         self._finish_step()
         if not label.startswith("Writing") and not label.startswith("Extending"):
             self.preview_text = ""
+            self._preview_newlines = 0
         self._step_label = label
         self._step_started = time.monotonic()
         self._step = self.progress.add_task(label, total=None, detail="")
 
     def preview(self, text: str) -> None:
+        # The engine streams one delta per token, but rich's Live repaints the
+        # whole dashboard on every frame with no diffing. Updating the panel
+        # per token makes it strobe; only redraw on completed lines instead.
+        n = text.count("\n")
+        if n <= self._preview_newlines:
+            return
+        self._preview_newlines = n
         self.preview_text = text
 
     def info(self, message: str) -> None:
@@ -184,6 +193,7 @@ class RichReporter:
     def chapter_done(self, number: int, title: str, words: int, cost: float) -> None:
         self._finish_step()
         self.preview_text = ""
+        self._preview_newlines = 0
         self.console.print(
             Panel(
                 Text.assemble(

@@ -72,7 +72,6 @@ nextchap export epub BOOK [-o PATH] [--template EPUB] [--check]
 nextchap models [--refresh]                       # model per role, live price, availability
 nextchap doctor
 nextchap config show | path | set KEY VALUE [--project] | set-key
-nextchap migrate [--from DIR] [--move]            # bring over 1.x ./novel_books data
 ```
 
 Shell completion (including book IDs): `nextchap --install-completion`.
@@ -127,10 +126,10 @@ Any OpenRouter model ID works for any role. The client reads each model's suppor
 
 ## Files
 
-Books live in the data directory (`nextchap config path`; override with `--data-dir` or `NEXTCHAP_HOME`):
+Books live in `novel_books/` inside the project directory (same layout as 1.x). A different root can be set with `--data-dir` or `NEXTCHAP_HOME`:
 
 ```
-books/<book-id>/
+novel_books/<book-id>/
   master_book.md            canonical text of every chapter (edit freely)
   style.md                  style guide sent with every writing request (edit freely)
   master_bible.md           story bible (edit freely; refreshed every 5 chapters)
@@ -145,7 +144,7 @@ logs/nextchap.log           full debug log (tracebacks land here)
 
 ## Upgrading from 1.x
 
-Run `nextchap migrate` in the old project folder. It copies `./novel_books/*` into the data directory. The world state, arc summaries and metadata are upgraded on first use, with the old world state kept as `world_state.v0.json`. The index is rebuilt locally because the embedding model changed. `python3 novel_generator.py …` and `python3 book_manager.py …` still work for one release and print the equivalent new command.
+1.x stored books in `./novel_books` — 2.0 uses the same folder, so old imports are picked up in place, but the 1.x scripts (`novel_generator.py`, `book_manager.py`) were removed. Re-run `nextchap import …` for any book whose story memory you want rebuilt (world state, summaries and the index are regenerated locally, no API cost for the index; summaries cost a small analyst/planner pass).
 
 ## Troubleshooting
 

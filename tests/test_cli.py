@@ -9,7 +9,6 @@ import pytest
 
 from nextchap.cli import app as app_mod
 from nextchap.cli.context import AppContext
-from nextchap.cli.legacy import book_manager, novel_generator
 from nextchap.llm.cost import CostMeter
 from tests.fakes import FakeLLM
 
@@ -31,7 +30,7 @@ def cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureF
 def test_full_workflow(cli, novel_epub: Path, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     code, _, err = cli("import", str(novel_epub), "--dry-run")
     assert code == 0 and "Detected chapters" in err and "Estimated import cost" in err
-    assert not (tmp_path / "data" / "books" / "novel").exists()
+    assert not (tmp_path / "data" / "novel_books" / "novel").exists()
 
     code, _, err = cli("import", str(novel_epub), "--yes")
     assert code == 0, err
@@ -122,24 +121,6 @@ def test_budget_flag_stops_generation(cli, novel_txt: Path) -> None:  # type: ig
     assert code == 0 and "Resuming chapter 7" in err
 
 
-def test_legacy_shims(cli, novel_txt: Path, capsys: pytest.CaptureFixture[str]) -> None:  # type: ignore[no-untyped-def]
-    assert novel_generator([str(novel_txt), "1", "--book-id", "Legacy Book"]) == 0
-    err = capsys.readouterr().err
-    assert "deprecated" in err
-    assert book_manager(["list"]) == 0
-    assert "legacy_book" in capsys.readouterr().out
-    assert book_manager(["rebuild-state", "Legacy Book", "--dry-run"]) == 0
-    assert book_manager(["rebuild-chroma", "legacy_book"]) == 0
-
-
-def test_legacy_shim_requires_migration(cli, tmp_path: Path, novel_txt: Path) -> None:  # type: ignore[no-untyped-def]
-    (tmp_path / "novel_books" / "old").mkdir(parents=True)
-    (tmp_path / "novel_books" / "old" / "master_book.md").write_text("## Chapter 1: A\n\nx\n")
-    assert novel_generator([str(novel_txt), "1", "--book-id", "old"]) == 1
-    code, _, err = cli("migrate", "--yes")
-    assert code == 0 and "migrated" in err
-
-
 def test_doctor_fails_without_key(cli, monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[no-untyped-def]
     from nextchap.models import ModelRegistry
 
@@ -151,3 +132,21 @@ def test_doctor_fails_without_key(cli, monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_meter_starts_clean() -> None:
     assert CostMeter().total_cost == 0
+
+
+def test_preview_updates_only_on_new_lines() -> None:
+    """Per-token preview updates must not touch the panel (they strobe the Live UI)."""
+    from rich.console import Console
+
+    from nextchap.cli.ui import RichReporter
+    from nextchap.config import Settings
+
+    r = RichReporter(Console(), CostMeter(), Settings())
+    r.preview("first words with no line break yet")
+    assert r.preview_text == ""  # no newline yet: panel stays untouched
+    r.preview("first words\nwith a line break")
+    assert r.preview_text.endswith("line break")
+    r.preview("first words\nwith a line break plus more")  # grew, but no new line
+    assert r.preview_text.endswith("line break")
+    r.preview("first words\nwith a line break\nand another")
+    assert r.preview_text.endswith("another")

@@ -107,7 +107,8 @@ class BookPaths:
 
 
 def books_dir(data_root: Path) -> Path:
-    return data_root / "books"
+    """Books live in <data_root>/novel_books/<book_id> (same layout as 1.x)."""
+    return data_root / "novel_books"
 
 
 def book_paths(data_root: Path, book_id: str) -> BookPaths:

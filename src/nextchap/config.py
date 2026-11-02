@@ -153,7 +153,8 @@ class Settings(BaseSettings):
 
     @property
     def data_root(self) -> Path:
-        return self.data_dir or Path(platformdirs.user_data_dir(APP_NAME))
+        """Project-local data root: books land in <root>/novel_books, logs in <root>/logs."""
+        return self.data_dir or Path.cwd()
 
     @property
     def cache_dir(self) -> Path:

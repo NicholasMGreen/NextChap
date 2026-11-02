@@ -44,10 +44,8 @@ src/nextchap/
   pipeline/        engine.py (sync + journaled generation), planner/writer/critic.py, plan.py,
                    journal.py, book.py (per-book files), manage.py (no-LLM ops), estimate.py
   prompts/         *.md templates (string.Template `$var`); bump PROMPT_VERSION when changing
-  storage/         paths.py (book-ID validation, layout), atomic.py, lock.py, migrate.py (1.x)
-  cli/             app.py (Typer commands, main()), commands_extra.py, ui.py (Rich), context.py,
-                   legacy.py (1.x script translation)
-novel_generator.py, book_manager.py   deprecated 1.x shims → nextchap.cli.legacy
+  storage/         paths.py (book-ID validation, layout), atomic.py, lock.py
+  cli/             app.py (Typer commands, main()), commands_extra.py, ui.py (Rich), context.py
 tests/             unit + engine + CLI end-to-end; fakes.py, conftest.py
 docs/MODERNIZATION_PLAN.md            design rationale
 ```
