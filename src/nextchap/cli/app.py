@@ -26,6 +26,7 @@ from nextchap.cli import commands_extra
 from nextchap.cli.context import AppContext
 from nextchap.cli.menu import run_menu
 from nextchap.cli.overview import overview_rows, overview_table
+from nextchap.cli.query import EXAMPLES_QUERY, query_cmd
 from nextchap.cli.resolve import available_books, resolve_book
 from nextchap.cli.ui import error_panel, money
 from nextchap.config import Settings
@@ -66,6 +67,7 @@ EXAMPLES = {
         "  nextchap fix deadp --rebuild-index # non-interactive repair"
     ),
     "export": "Examples:\n  nextchap export\n  nextchap export deadp -o novel.epub",
+    "query": EXAMPLES_QUERY,
 }
 
 app = typer.Typer(
@@ -85,6 +87,7 @@ index_app = typer.Typer(help="Manage the retrieval index.", no_args_is_help=True
 app.add_typer(books_app, name="books")
 app.add_typer(state_app, name="state")
 app.add_typer(index_app, name="index")
+app.command("query", epilog=EXAMPLES["query"])(query_cmd)
 commands_extra.register(app)
 
 

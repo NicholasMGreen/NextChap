@@ -17,8 +17,11 @@ from rich.text import Text
 
 from nextchap.cli.context import AppContext
 from nextchap.cli.overview import overview_rows, overview_table
+from nextchap.cli.query import run_query
 from nextchap.cli.resolve import available_books
-from nextchap.cli.ui import money
+from nextchap.cli.ui import error_panel, money
+from nextchap.errors import NextChapError
+from nextchap.pipeline.book import Book
 
 
 def _book_panel(rows: list[dict[str, Any]], count: int) -> Panel:
@@ -84,6 +87,7 @@ def run_menu(app_ctx: AppContext) -> list[str] | None:
         "generate next chapter(s)",
         "status / continuity report",
         "fix (rebuild index, clean, roll back…)",
+        "query passages (no API cost)",
         "export epub",
         "switch book",
         "quit",
@@ -113,8 +117,17 @@ def run_menu(app_ctx: AppContext) -> list[str] | None:
         if choice == 3:
             return ["fix", chosen]
         if choice == 4:
-            return ["export", chosen]
+            question = Prompt.ask("Question", default="", console=app_ctx.err).strip()
+            if not question:
+                continue
+            try:
+                run_query(app_ctx, Book.open(app_ctx.settings, chosen), question)
+            except NextChapError as exc:
+                error_panel(app_ctx.err, exc)
+            continue
         if choice == 5:
+            return ["export", chosen]
+        if choice == 6:
             app_ctx.err.print(_book_panel(rows, len(ids)))
             chosen = choose_book()
             continue

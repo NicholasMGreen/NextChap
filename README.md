@@ -47,6 +47,13 @@ Run `nextchap` with no arguments to get a book picker and an action menu. Book
 IDs are fuzzy: `nextchap generate deadp` finds `deadpool_twilight_v2`, and
 omitting the ID picks the only book (or asks when there are several).
 
+`nextchap query "what did Walter learn about Wade"` searches the book's existing
+index and prints the best-matching passages with chapter numbers. It is a
+read-only search: no model calls, no spend. `-k` sets how many passages to show
+(default `retrieval.top_k`), and `--json` returns `{chapter, score, excerpt}`
+rows for scripts. If the index is missing or stale, run
+`nextchap fix BOOK --rebuild-index`.
+
 While it runs you see a progress bar for each phase, a live preview of the prose as it streams, and a footer with spend, tokens, and cache hit rate. Press Ctrl-C once to stop at the next safe point, or twice to abort. Re-running the same command resumes from the last completed step, whether you stopped it yourself or it crashed.
 
 Useful flags:
@@ -60,7 +67,7 @@ Useful flags:
 | `--preview` / `--no-preview` | Show or hide the streaming preview |
 | `--epub` / `--no-epub` | Re-export the EPUB afterwards, or don't |
 | `--plain` | Plain log lines (automatic when output isn't a terminal) |
-| `--json` | Machine-readable output for `status`, `models`, `doctor`, `config show` |
+| `--json` | Machine-readable output for `status`, `query`, `models`, `doctor`, `config show` |
 
 ## Commands
 
@@ -69,6 +76,7 @@ nextchap                         # interactive book → action menu
 nextchap import FILE [--book-id ID] [--dry-run] [--yes] [--force] [--max-cost N]
 nextchap generate [BOOK] [-n N] [--max-cost N] [--review] [--dry-run]
 nextchap status [BOOK] [--json]  # overview, world state, spend, index, journal
+nextchap query [BOOK] "question" # matching passages; -k N, --json (no model calls)
 nextchap fix [BOOK]              # diagnose + numbered repairs (index/state/clean/
                                  #   rollback/delete), or --rebuild-index
                                  #   --rebuild-state / --clean for scripts

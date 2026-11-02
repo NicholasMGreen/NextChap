@@ -290,3 +290,83 @@ def test_preview_updates_only_on_new_lines() -> None:
     assert r.preview_text.endswith("line break")
     r.preview("first words\nwith a line break\nand another")
     assert r.preview_text.endswith("another")
+
+
+def test_query_returns_matching_chapter(cli, novel_txt: Path) -> None:  # type: ignore[no-untyped-def]
+    assert cli("import", str(novel_txt))[0] == 0
+    code, out, err = cli("query", "novel", "src3", "-k", "1")
+    assert code == 0, err
+    assert "Query: src3" in out and "Book: novel" in out and "Ch 03" in out
+
+
+def test_query_json_shape_and_single_positional(cli, novel_txt: Path) -> None:  # type: ignore[no-untyped-def]
+    assert cli("import", str(novel_txt))[0] == 0
+    code, out, err = cli("query", "src3", "--json")
+    assert code == 0, err
+    rows = json.loads(out)
+    assert rows and set(rows[0]) == {"chapter", "score", "excerpt"}
+    assert rows[0]["chapter"] == 3
+
+
+def test_query_fuzzy_book_and_explicit_book(cli, novel_txt: Path) -> None:  # type: ignore[no-untyped-def]
+    assert cli("import", str(novel_txt))[0] == 0
+    for partial in ("nov", "novl"):
+        code, out, err = cli("query", partial, "src3", "--json")
+        assert code == 0, err
+        assert json.loads(out)[0]["chapter"] == 3
+
+
+def test_query_no_question_non_tty(cli, novel_txt: Path) -> None:  # type: ignore[no-untyped-def]
+    assert cli("import", str(novel_txt))[0] == 0
+    code, _, err = cli("query", "novel")
+    assert code == 1 and "No question given" in err
+
+
+def test_query_missing_index_errors_with_fix_hint(cli, novel_txt: Path, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    assert cli("import", str(novel_txt))[0] == 0
+    from nextchap.config import Settings
+    from nextchap.retrieval.store import VectorStore
+
+    book_dir = tmp_path / "data" / "novel_books" / "novel"
+    VectorStore.reset(book_dir / "index")
+    code, _, err = cli("query", "novel", "src3")
+    assert code == 1 and "nextchap fix" in err and "rebuild-index" in err
+    assert Settings(data_dir=tmp_path / "data").data_root.exists()
+
+
+def test_query_embedding_mismatch_does_not_rebuild(cli, novel_txt: Path, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    assert cli("import", str(novel_txt))[0] == 0
+    from nextchap.config import RetrievalConfig, Settings
+    from nextchap.ingest.master_book import Chapter
+    from nextchap.retrieval.embed import HashEmbedder
+    from nextchap.retrieval.store import VectorStore
+
+    index = tmp_path / "data" / "novel_books" / "novel" / "index"
+    VectorStore.reset(index)
+    VectorStore(index, HashEmbedder(dim=64), RetrievalConfig()).upsert_chapters(
+        [Chapter(1, "T", "src3 words here")]
+    )
+    code, _, err = cli("query", "novel", "src3")
+    assert code == 1 and "embed_model" in err and "nextchap fix" in err
+    info = VectorStore.inspect(index)
+    assert info is not None and info.chunks == 1  # no rebuild happened
+    assert Settings(data_dir=tmp_path / "data").retrieval.embed_backend == "hash"
+
+
+def test_query_action_in_menu(
+    cli,
+    novel_txt: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:  # type: ignore[no-untyped-def]
+    assert cli("import", str(novel_txt))[0] == 0
+    from nextchap.cli import menu
+
+    monkeypatch.setattr(AppContext, "interactive", property(lambda self: True))
+    answers = iter(["4", "src3", "7"])
+    monkeypatch.setattr(menu.Prompt, "ask", lambda *a, **k: next(answers))
+    code = app_mod.main([])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert "query passages (no API cost)" in err
+    assert "Ch 03" in out
