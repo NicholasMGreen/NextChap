@@ -45,7 +45,9 @@ src/nextchap/
                    journal.py, book.py (per-book files), manage.py (no-LLM ops), estimate.py
   prompts/         *.md templates (string.Template `$var`); bump PROMPT_VERSION when changing
   storage/         paths.py (book-ID validation, layout), atomic.py, lock.py
-  cli/             app.py (Typer commands, main()), commands_extra.py, ui.py (Rich), context.py
+  cli/             app.py (Typer commands, main()), resolve.py (fuzzy book IDs + picker),
+                   menu.py (bare `nextchap` book → action menu), commands_extra.py,
+                   ui.py (Rich), context.py
 tests/             unit + engine + CLI end-to-end; fakes.py, conftest.py
 docs/MODERNIZATION_PLAN.md            design rationale
 ```
@@ -63,8 +65,19 @@ docs/MODERNIZATION_PLAN.md            design rationale
 - **Every file write goes through `storage/atomic.py`** and uses UTF-8.
 - **World-state updates** go through `apply_delta`, which returns a new object, never mutates its input, and raises `DeltaRejected` on bad data. Threads and characters are referenced by stable IDs (`t001`, `char_lin_feng`).
 - **The LLM client retries only `RetryableLLMError`** (429, 5xx, timeouts, empty answers). Auth and credit errors are `FatalLLMError` with hints. It checks `meter.check_budget()` before every request and only sends parameters listed in the model's `supported_parameters`. Haiku 5.5 rejects `temperature` and `top_p`.
-- **The embedding model is recorded in Chroma collection metadata.** A mismatch raises `IndexMismatch`. Changing embeddings or the chunker requires `nextchap index rebuild`.
+- **The embedding model is recorded in Chroma collection metadata.** A mismatch raises `IndexMismatch`. Changing embeddings or the chunker requires `nextchap fix --rebuild-index`.
 - **Resetting the index** must go through `VectorStore.reset()`. Chroma caches clients per path in-process, so deleting the folder directly breaks later opens.
+
+## User-facing CLI surface
+
+`nextchap` (no args) opens the book/action menu. The visible verbs are
+`import`, `generate`, `status`, `fix`, `export`, `models`, `doctor`, `config`.
+Book arguments are optional and resolved through `cli/resolve.py`
+(exact → prefix → fuzzy → picker; case/space-insensitive). `books`, `state`,
+`index`, `clean` and `export epub` remain hidden legacy aliases. Deletion is in
+the `fix` menu; hidden `books delete` requires an exact ID. `[defaults]` in
+`nextchap.toml` sets recurring choices (`chapters`, `max_cost`, `review`,
+`preview`, `critic`, `export_epub`); CLI flags always win.
 
 ## Conventions
 

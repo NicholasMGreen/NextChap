@@ -23,7 +23,7 @@ class InvalidBookId(NextChapError):
 
 
 class BookNotFound(NextChapError):
-    hint = "Run `nextchap books list` to see available books."
+    hint = "Run `nextchap status` to see available books."
 
 
 class BookExists(NextChapError):
@@ -35,11 +35,11 @@ class BookLocked(NextChapError):
 
 
 class IndexMismatch(NextChapError):
-    hint = "Run `nextchap index rebuild <book-id>` (local only, no API cost)."
+    hint = "Run `nextchap fix <book-id> --rebuild-index` (local only, no API cost)."
 
 
 class BudgetExceeded(NextChapError):
-    hint = "Raise --max-cost or set generation.max_cost in nextchap.toml."
+    hint = "Raise --max-cost or set defaults.max_cost in nextchap.toml."
 
 
 class ParseError(NextChapError):

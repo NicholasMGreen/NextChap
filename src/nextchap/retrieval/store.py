@@ -41,6 +41,13 @@ class Hit:
     score: float
 
 
+@dataclass(frozen=True)
+class IndexInfo:
+    chunks: int
+    metadata: dict[str, Any]
+    unreadable: bool = False
+
+
 class Reranker(Protocol):
     def scores(self, query: str, docs: list[str]) -> list[float]: ...
 
@@ -135,6 +142,20 @@ class VectorStore:
 
             shutil.rmtree(path, ignore_errors=True)
             SharedSystemClient.clear_system_cache()
+
+    @staticmethod
+    def inspect(path: Path) -> IndexInfo | None:
+        """Read index metadata without constructing an embedder (for status output)."""
+        if not path.exists():
+            return None
+        try:
+            client = chromadb.PersistentClient(
+                path=str(path), settings=ChromaSettings(anonymized_telemetry=False)
+            )
+            col = client.get_collection(COLLECTION, embedding_function=None)
+        except Exception as exc:
+            return IndexInfo(0, {"error": str(exc)}, unreadable=True)
+        return IndexInfo(int(col.count()), dict(col.metadata or {}))
 
     def count(self) -> int:
         return int(self._col.count())

@@ -1,7 +1,7 @@
 # CLI Simplification Plan
 
-Status: draft, approved direction (2026-11-02). Owner decisions recorded in
-the "Decisions" section below. Implementation not started.
+Status: implemented (2026-11-02). Owner decisions recorded in the "Decisions"
+section below. Implementation notes at the end.
 
 ## Goal
 
@@ -142,3 +142,22 @@ behavior (no forced interactivity).
 
 Roughly three working sessions; Phases 1 + 5 alone are a large UX win if a
 first cut is wanted sooner.
+
+## Implementation notes
+
+- `cli/resolve.py` implements the exact → prefix → fuzzy ladder and the Rich
+  picker. Validation still happens before any path is built, so traversal-like
+  IDs keep raising `InvalidBookId`.
+- `status` without a book lists all books when there are zero or several;
+  `status BOOK` shows the detailed report. This is the one intentional
+deviation from the "always pick a book" ladder, so `books list` has a visible
+  replacement.
+- `export` accepts both `nextchap export BOOK` and the old
+  `nextchap export epub BOOK` form (the latter prints a deprecation line).
+- `fix` diagnoses summaries, world state, journal, master-book noise and index
+  metadata. It offers numbered repairs interactively and
+  `--rebuild-index` / `--rebuild-state` / `--clean` for scripts.
+- `config show` now strips nested `None` values before TOML output (needed by
+  the optional `[defaults]` booleans).
+- New tests: `tests/test_resolve.py` plus end-to-end status/fix/export/menu and
+  defaults-precedence cases in `tests/test_cli.py`.

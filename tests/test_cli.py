@@ -96,10 +96,14 @@ def test_config_set_and_show(cli, tmp_path: Path) -> None:  # type: ignore[no-un
     assert "min_words = 1200" in (tmp_path / "nextchap.toml").read_text()
     code, out, _ = cli("config", "show", "--json")
     assert json.loads(out)["generation"]["min_words"] == 1200
+    code, out, _ = cli("config", "show")
+    assert code == 0 and "[defaults]" in out and "None" not in out
     code, _, err = cli("config", "set", "generation.min_words", '"lots"', "--project")
     assert code == 1 and "Invalid value" in err
     code, _, err = cli("config", "set", "api_key", "sk-or-x")
     assert code == 1
+    code, _, err = cli("config", "set", "defaults.chapters", "0", "--project")
+    assert code == 1 and "Invalid value" in err
 
 
 def test_models_offline_json(cli, monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[no-untyped-def]
@@ -128,6 +132,142 @@ def test_doctor_fails_without_key(cli, monkeypatch: pytest.MonkeyPatch) -> None:
     code, out, _ = cli("doctor", "--json")
     checks = {c["check"]: c["status"] for c in json.loads(out)}
     assert code == 1 and checks["API key"] == "fail" and checks["Python"] == "ok"
+    assert "Shell completion" in checks
+
+
+def test_non_tty_import_defaults_to_yes(cli, novel_txt: Path) -> None:  # type: ignore[no-untyped-def]
+    code, _, err = cli("import", str(novel_txt))
+    assert code == 0 and "Imported" in err
+
+
+def test_defaults_precedence(cli, novel_txt: Path, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    assert cli("import", str(novel_txt))[0] == 0
+    code, _, err = cli("generate", "novel", "--dry-run")
+    assert code == 0 and "Estimated cost for 1 chapter(s)" in err
+
+    (tmp_path / "nextchap.toml").write_text("[defaults]\nchapters = 3\n", encoding="utf-8")
+    code, _, err = cli("generate", "novel", "--dry-run")
+    assert code == 0 and "Estimated cost for 3 chapter(s)" in err
+
+    code, _, err = cli("generate", "novel", "--dry-run", "-n", "2")
+    assert code == 0 and "Estimated cost for 2 chapter(s)" in err
+
+
+def test_status_fuzzy_and_fix(cli, novel_txt: Path) -> None:  # type: ignore[no-untyped-def]
+    assert cli("import", str(novel_txt))[0] == 0
+
+    code, out, err = cli("status", "nov")
+    assert code == 0 and "Total spend" in out and "Journal" in out and "novel" in out
+
+    code, out, _ = cli("status", "novel", "--json")
+    data = json.loads(out)
+    assert code == 0 and data["index"]["ok"] is True and data["index"]["chunks"] > 0
+    assert data["journal"] is None and "[yellow]" not in out
+
+    code, _, err = cli("generate", "novl", "--dry-run")
+    assert code == 0 and "using book" in err and "novel" in err
+
+    code, _, err = cli("fix", "novel")
+    assert code == 0 and ("no problems found" in err or "Diagnosis" in err)
+
+    code, _, err = cli("fix", "novel", "--rebuild-index")
+    assert code == 0 and "Indexed" in err
+
+
+def test_fix_guards_and_exact_delete(cli, novel_txt: Path) -> None:  # type: ignore[no-untyped-def]
+    assert cli("import", str(novel_txt))[0] == 0
+
+    code, _, err = cli("fix", "novel", "--rebuild-index", "--clean")
+    assert code == 1 and "one repair at a time" in err
+    code, _, err = cli("fix", "novel", "--clean", "--dry-run")
+    assert code == 1 and "--dry-run only applies" in err
+
+    code, _, err = cli("books", "delete", "novl", "--yes")
+    assert code == 1 and "exact ID" in err
+    code, out, _ = cli("status", "novel", "--json")
+    assert json.loads(out)["book_id"] == "novel"
+
+    code, _, err = cli("books", "delete", "novel", "--yes")
+    assert code == 0 and "Deleted" in err
+
+
+def test_fix_interactive_repairs(
+    cli, novel_txt: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    assert cli("import", str(novel_txt))[0] == 0
+    monkeypatch.setattr(AppContext, "interactive", property(lambda self: True))
+
+    monkeypatch.setattr(app_mod.Prompt, "ask", lambda *a, **k: "1")
+    code, _, err = cli("fix", "novel")
+    assert code == 0 and "Indexed" in err
+
+    monkeypatch.setattr(app_mod.Prompt, "ask", lambda *a, **k: "2")
+    code, _, err = cli("fix", "novel")
+    assert code == 0 and "Renumbered" in err
+
+    master = tmp_path / "data" / "novel_books" / "novel" / "master_book.md"
+    master.write_text(
+        master.read_text(encoding="utf-8") + "\nRead 10 chapters in advance on Patreon!\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(app_mod.Prompt, "ask", lambda *a, **k: "3")
+    code, _, err = cli("fix", "novel")
+    assert code == 0 and "Removed" in err
+
+
+def test_fix_interactive_rollback(
+    cli, novel_txt: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    assert cli("import", str(novel_txt))[0] == 0
+    from nextchap.config import Settings
+    from nextchap.pipeline.book import Book
+
+    book = Book.open(Settings(data_dir=tmp_path / "data"), "novel")
+    book.world.save(book.world.load().model_copy(update={"chapter_count": 5}))
+
+    monkeypatch.setattr(AppContext, "interactive", property(lambda self: True))
+    answers = iter(["4", "5"])
+    monkeypatch.setattr(app_mod.Prompt, "ask", lambda *a, **k: next(answers))
+    monkeypatch.setattr(app_mod.Confirm, "ask", lambda *a, **k: True)
+    code, _, err = cli("fix", "novel")
+    assert code == 0 and "restored to chapter 5" in err and "removed chapters 6-6" in err
+
+
+def test_status_lists_all_books(cli, novel_txt: Path) -> None:  # type: ignore[no-untyped-def]
+    assert cli("import", str(novel_txt), "--book-id", "one")[0] == 0
+    assert cli("import", str(novel_txt), "--book-id", "two")[0] == 0
+    code, out, _ = cli("status", "--json")
+    rows = json.loads(out)
+    assert code == 0 and {r["book_id"] for r in rows} == {"one", "two"}
+
+
+def test_export_new_and_legacy_forms(cli, novel_txt: Path, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    assert cli("import", str(novel_txt))[0] == 0
+    new_path = tmp_path / "new.epub"
+    code, _, err = cli("export", "novel", "-o", str(new_path))
+    assert code == 0 and new_path.exists() and "Wrote" in err
+
+    old_path = tmp_path / "old.epub"
+    code, _, err = cli("export", "epub", "novel", "-o", str(old_path))
+    assert code == 0 and old_path.exists() and "deprecated" in err
+
+
+def test_unknown_command_suggests(cli) -> None:  # type: ignore[no-untyped-def]
+    code, _, err = cli("statuss")
+    assert code == 2 and "Did you mean" in err and "status" in err
+
+
+def test_interactive_menu_via_bare_command(
+    cli, novel_txt: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:  # type: ignore[no-untyped-def]
+    assert cli("import", str(novel_txt))[0] == 0
+    from nextchap.cli import menu
+
+    monkeypatch.setattr(AppContext, "interactive", property(lambda self: True))
+    monkeypatch.setattr(menu.Prompt, "ask", lambda *a, **k: "2")
+    code = app_mod.main([])
+    out, _ = capsys.readouterr()
+    assert code == 0 and "Total spend" in out
 
 
 def test_meter_starts_clean() -> None:

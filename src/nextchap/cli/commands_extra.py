@@ -31,6 +31,15 @@ from nextchap.memory.world_state import WorldState
 
 JsonOpt = Annotated[bool, typer.Option("--json", help="Machine-readable output on stdout.")]
 
+EXAMPLES_MODELS = "Examples:\n  nextchap models\n  nextchap models --refresh"
+EXAMPLES_DOCTOR = "Examples:\n  nextchap doctor\n  nextchap doctor --json"
+EXAMPLES_CONFIG = (
+    "Examples:\n"
+    "  nextchap config path\n"
+    "  nextchap config set defaults.chapters 3\n"
+    "  nextchap config set-key"
+)
+
 
 def _app_ctx(ctx: typer.Context) -> Any:
     return ctx.find_root().obj
@@ -210,6 +219,19 @@ def _hf_cached(model: str) -> bool:
     return hub.exists()
 
 
+def _completion_file() -> Path | None:
+    """Best-effort lookup of an installed shell completion script."""
+    home = Path.home()
+    candidates = (
+        home / ".zfunc" / "_nextchap",
+        home / ".zsh" / "completions" / "_nextchap",
+        home / ".oh-my-zsh" / "completions" / "_nextchap",
+        home / ".local" / "share" / "bash-completion" / "completions" / "nextchap",
+        home / ".config" / "fish" / "completions" / "nextchap.fish",
+    )
+    return next((path for path in candidates if path.exists()), None)
+
+
 def doctor_cmd(ctx: typer.Context, as_json: JsonOpt = False) -> None:
     """Check Python, API key, credits, models, embeddings and storage."""
     app_ctx = _app_ctx(ctx)
@@ -296,7 +318,13 @@ def doctor_cmd(ctx: typer.Context, as_json: JsonOpt = False) -> None:
     add(
         "epubcheck",
         "ok" if shutil.which("epubcheck") else "info",
-        "available" if shutil.which("epubcheck") else "optional; enables `export epub --check`",
+        "available" if shutil.which("epubcheck") else "optional; enables `export --check`",
+    )
+    completion = _completion_file()
+    add(
+        "Shell completion",
+        "ok" if completion else "info",
+        str(completion) if completion else "not installed; run `nextchap --install-completion`",
     )
     if as_json:
         app_ctx.out.print_json(json.dumps(checks))
@@ -318,10 +346,12 @@ def doctor_cmd(ctx: typer.Context, as_json: JsonOpt = False) -> None:
         raise typer.Exit(1)
 
 
-config_app = typer.Typer(help="Show and change settings.", no_args_is_help=True)
+config_app = typer.Typer(
+    help="Show and change settings.", no_args_is_help=True, epilog=EXAMPLES_CONFIG
+)
 
 
-@config_app.command("show")
+@config_app.command("show", epilog="Example:\n  nextchap config show --json")
 def config_show(ctx: typer.Context, as_json: JsonOpt = False) -> None:
     """Print the resolved settings (API key masked)."""
     app_ctx = _app_ctx(ctx)
@@ -334,12 +364,10 @@ def config_show(ctx: typer.Context, as_json: JsonOpt = False) -> None:
     import tomli_w
     from rich.syntax import Syntax
 
-    app_ctx.out.print(
-        Syntax(tomli_w.dumps({k: v for k, v in data.items() if v is not None}), "toml")
-    )
+    app_ctx.out.print(Syntax(tomli_w.dumps(_toml_safe(data)), "toml"))
 
 
-@config_app.command("path")
+@config_app.command("path", epilog="Example:\n  nextchap config path")
 def config_path(ctx: typer.Context) -> None:
     """Show where settings are read from."""
     app_ctx = _app_ctx(ctx)
@@ -350,6 +378,14 @@ def config_path(ctx: typer.Context) -> None:
     app_ctx.out.print(f"{'data':8} {app_ctx.settings.data_root}")
 
 
+def _toml_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _toml_safe(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_toml_safe(v) for v in value]
+    return value
+
+
 def _parse_value(raw: str) -> Any:
     try:
         return json.loads(raw)
@@ -357,7 +393,7 @@ def _parse_value(raw: str) -> Any:
         return raw
 
 
-@config_app.command("set")
+@config_app.command("set", epilog="Example:\n  nextchap config set defaults.chapters 3 --project")
 def config_set(
     ctx: typer.Context,
     key: Annotated[str, typer.Argument(help="Dotted key, e.g. models.writer.model")],
@@ -393,7 +429,7 @@ def config_set(
     app_ctx.err.print(f"[green]✓[/] {key} = {node[parts[-1]]!r} in {path}")
 
 
-@config_app.command("set-key")
+@config_app.command("set-key", epilog="Example:\n  nextchap config set-key")
 def config_set_key(ctx: typer.Context) -> None:
     """Store the OpenRouter API key in the OS keyring."""
     app_ctx = _app_ctx(ctx)
@@ -412,6 +448,6 @@ def config_set_key(ctx: typer.Context) -> None:
 
 
 def register(app: typer.Typer) -> None:
-    app.command("models")(models_cmd)
-    app.command("doctor")(doctor_cmd)
+    app.command("models", epilog=EXAMPLES_MODELS)(models_cmd)
+    app.command("doctor", epilog=EXAMPLES_DOCTOR)(doctor_cmd)
     app.add_typer(config_app, name="config")

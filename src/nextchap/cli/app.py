@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import signal
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
+from difflib import get_close_matches
 from pathlib import Path
 from types import FrameType
 from typing import Annotated, Any
@@ -15,18 +17,21 @@ from typing import Annotated, Any
 import typer
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Confirm
+from rich.prompt import Confirm, Prompt
 from rich.table import Table
 from rich.text import Text
 
 from nextchap import __version__
 from nextchap.cli import commands_extra
 from nextchap.cli.context import AppContext
+from nextchap.cli.menu import run_menu
+from nextchap.cli.overview import overview_rows, overview_table
+from nextchap.cli.resolve import available_books, resolve_book
 from nextchap.cli.ui import error_panel, money
 from nextchap.config import Settings
 from nextchap.errors import BookExists, IndexMismatch, NextChapError, ParseError
 from nextchap.ingest import master_book
-from nextchap.ingest.cleanup import NoiseFilter
+from nextchap.ingest.cleanup import NoiseFilter, clean_master_markdown
 from nextchap.ingest.epub import EpubMeta, read_epub
 from nextchap.ingest.text import DetectionReport, parse_text_file
 from nextchap.llm.cost import CostMeter, logged_spend
@@ -35,30 +40,51 @@ from nextchap.pipeline.book import Book, BookMeta
 from nextchap.pipeline.engine import Engine
 from nextchap.pipeline.engine import export_epub as write_book_epub
 from nextchap.pipeline.estimate import EstimateRow, estimate_generation, estimate_import, total
+from nextchap.pipeline.journal import Journal
 from nextchap.retrieval.context import estimate_tokens
+from nextchap.retrieval.embed import embedder_name
+from nextchap.retrieval.store import CHUNKER_VERSION, VectorStore
 from nextchap.storage.lock import book_lock
 from nextchap.storage.paths import all_book_ids, slugify, validate_book_id
 
 log = logging.getLogger("nextchap")
 
+EXAMPLES = {
+    "import": "Examples:\n  nextchap import novel.epub\n  nextchap import novel.txt --dry-run",
+    "generate": (
+        "Examples:\n"
+        "  nextchap generate                  # one chapter, using defaults\n"
+        "  nextchap generate deadp -n 3       # fuzzy book ID, three chapters\n"
+        "  nextchap generate --dry-run -n 2   # cost estimate, spend nothing"
+    ),
+    "status": (
+        "Examples:\n  nextchap status\n  nextchap status deadp\n  nextchap status deadp --json"
+    ),
+    "fix": (
+        "Examples:\n"
+        "  nextchap fix                       # diagnose, then pick a repair\n"
+        "  nextchap fix deadp --rebuild-index # non-interactive repair"
+    ),
+    "export": "Examples:\n  nextchap export\n  nextchap export deadp -o novel.epub",
+}
+
 app = typer.Typer(
     name="nextchap",
     help="Continue web novels from EPUB/TXT with long-term story memory.",
-    no_args_is_help=True,
+    no_args_is_help=False,
+    invoke_without_command=True,
     rich_markup_mode="rich",
     pretty_exceptions_enable=False,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
-books_app = typer.Typer(help="List, inspect and delete books.", no_args_is_help=True)
+books_app = typer.Typer(help="List, inspect and delete books.", no_args_is_help=True, hidden=True)
 state_app = typer.Typer(
-    help="Inspect, rebuild and roll back the world state.", no_args_is_help=True
+    help="Inspect, rebuild and roll back the world state.", no_args_is_help=True, hidden=True
 )
-index_app = typer.Typer(help="Manage the retrieval index.", no_args_is_help=True)
-export_app = typer.Typer(help="Export books.", no_args_is_help=True)
+index_app = typer.Typer(help="Manage the retrieval index.", no_args_is_help=True, hidden=True)
 app.add_typer(books_app, name="books")
 app.add_typer(state_app, name="state")
 app.add_typer(index_app, name="index")
-app.add_typer(export_app, name="export")
 commands_extra.register(app)
 
 
@@ -76,7 +102,12 @@ def complete_book_id(incomplete: str) -> list[str]:
 
 
 BookId = Annotated[
-    str, typer.Argument(help="Book ID.", autocompletion=complete_book_id, show_default=False)
+    str | None,
+    typer.Argument(
+        help="Book ID (exact, prefix or close typo). Omit to pick a book.",
+        autocompletion=complete_book_id,
+        show_default=False,
+    ),
 ]
 JsonOpt = Annotated[bool, typer.Option("--json", help="Machine-readable output on stdout.")]
 
@@ -87,7 +118,19 @@ def _version(value: bool) -> None:
         raise typer.Exit
 
 
-@app.callback()
+def _deprecated(app_ctx: AppContext, old: str, new: str) -> None:
+    app_ctx.err.print(f"[yellow]![/] `{old}` is deprecated; use [bold]{new}[/] instead.")
+
+
+def _forwarded_root_args(app_ctx: AppContext) -> list[str]:
+    args: list[str] = []
+    if app_ctx.data_dir is not None:
+        args.extend(["--data-dir", str(app_ctx.data_dir)])
+    args.extend(["-v"] * app_ctx.verbose)
+    return args
+
+
+@app.callback(invoke_without_command=True)
 def root(
     ctx: typer.Context,
     data_dir: Annotated[
@@ -109,13 +152,28 @@ def root(
     app_ctx = AppContext(data_dir=data_dir, verbose=verbose, plain=plain)
     ctx.obj = app_ctx
     app_ctx.setup_logging()
+    if ctx.invoked_subcommand is None:
+        if app_ctx.interactive:
+            argv = run_menu(app_ctx)
+            if argv is not None:
+                rv = app(args=[*_forwarded_root_args(app_ctx), *argv], standalone_mode=False)
+                raise typer.Exit(rv if isinstance(rv, int) else 0)
+        typer.echo(ctx.get_help())
+        raise typer.Exit
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 
-def _open_book(app_ctx: AppContext, book_id: str) -> Book:
-    return Book.open(app_ctx.settings, validate_book_id(book_id))
+def _open_book(app_ctx: AppContext, book_id: str | None, *, require_exact: bool = False) -> Book:
+    paths = resolve_book(
+        app_ctx.settings,
+        book_id,
+        console=app_ctx.err,
+        interactive=app_ctx.interactive,
+        require_exact=require_exact,
+    )
+    return Book(paths, app_ctx.settings)
 
 
 def _estimate_table(title: str, rows: list[EstimateRow]) -> Table:
@@ -182,6 +240,16 @@ def _run_with_index_guard(app_ctx: AppContext, book: Book, fn: Any) -> Any:
         return fn()
 
 
+def _budget(app_ctx: AppContext, cli_value: float | None) -> float | None:
+    """CLI flag > [defaults] > [generation] > no cap."""
+    d = app_ctx.settings.defaults
+    if cli_value is not None:
+        return cli_value
+    if d.max_cost is not None:
+        return d.max_cost
+    return app_ctx.settings.generation.max_cost
+
+
 def _detect(app_ctx: AppContext, file: Path) -> tuple[DetectionReport, EpubMeta, str]:
     noise = NoiseFilter(app_ctx.settings.cleanup.extra_noise_patterns)
     suffix = file.suffix.lower()
@@ -225,10 +293,48 @@ def _detection_panel(report: DetectionReport, file: Path) -> Panel:
     return Panel(Group(*items), title="Detected chapters", border_style="cyan", expand=False)
 
 
+def _index_data(app_ctx: AppContext, book: Book) -> dict[str, Any] | None:
+    info = VectorStore.inspect(book.paths.index)
+    if info is None:
+        return None
+    expected = embedder_name(app_ctx.settings)
+    model = str(info.metadata.get("embed_model", "?"))
+    chunker = str(info.metadata.get("chunker", "?"))
+    ok = not info.unreadable and model == expected and chunker == CHUNKER_VERSION
+    data: dict[str, Any] = {
+        "chunks": info.chunks,
+        "embed_model": model,
+        "chunker": chunker,
+        "ok": ok,
+    }
+    if info.unreadable:
+        data["error"] = str(info.metadata.get("error", "unreadable"))
+    elif model != expected:
+        data["expected_embed_model"] = expected
+    elif chunker != CHUNKER_VERSION:
+        data["expected_chunker"] = CHUNKER_VERSION
+    return data
+
+
+def _index_summary(app_ctx: AppContext, book: Book) -> str:
+    data = _index_data(app_ctx, book)
+    if data is None:
+        return "not built (syncs on the next run)"
+    if data.get("error"):
+        return "unreadable; run [bold]nextchap fix --rebuild-index[/]"
+    state = "ok"
+    if not data["ok"]:
+        if data.get("expected_embed_model"):
+            state = f"[yellow]mismatch: settings use {data['expected_embed_model']}[/]"
+        else:
+            state = f"[yellow]old chunker; expected {data.get('expected_chunker')}[/]"
+    return f"{data['chunks']:,} chunks · {data['embed_model']} · {data['chunker']} · {state}"
+
+
 # ── import / generate ─────────────────────────────────────────────────────────
 
 
-@app.command("import")
+@app.command("import", epilog=EXAMPLES["import"])
 def import_cmd(
     ctx: typer.Context,
     file: Annotated[
@@ -264,11 +370,7 @@ def import_cmd(
     app_ctx.err.print(_estimate_table("Estimated import cost", rows))
     if dry_run:
         return
-    if not yes:
-        if not app_ctx.err.is_terminal:
-            raise NextChapError(
-                "Confirmation needed.", hint="Re-run with --yes to import non-interactively."
-            )
+    if not yes and app_ctx.interactive:
         prompt = f"Import {len(report.chapters)} chapters as '{bid}' (about {money(total(rows))})?"
         if book.exists():
             prompt = f"Replace existing book '{bid}' and import {len(report.chapters)} chapters?"
@@ -277,7 +379,7 @@ def import_cmd(
     if book.exists():
         manage.delete_book(book)
 
-    meter = CostMeter(max_cost if max_cost is not None else app_ctx.settings.generation.max_cost)
+    meter = CostMeter(_budget(app_ctx, max_cost))
     book.paths.root.mkdir(parents=True, exist_ok=True)
     meter.bind(book.paths.usage, bid)
     reporter = app_ctx.reporter(meter)
@@ -311,39 +413,54 @@ def import_cmd(
     )
 
 
-@app.command()
+@app.command("generate", epilog=EXAMPLES["generate"])
 def generate(
     ctx: typer.Context,
-    book_id: BookId,
+    book_id: BookId = None,
     chapters: Annotated[
-        int, typer.Option("-n", "--chapters", min=1, help="How many chapters.")
-    ] = 1,
+        int | None,
+        typer.Option(
+            "-n", "--chapters", min=1, help="How many chapters (or set defaults.chapters)."
+        ),
+    ] = None,
     max_cost: Annotated[
         float | None, typer.Option("--max-cost", help="Stop before spend passes this (USD).")
     ] = None,
     review: Annotated[
-        bool, typer.Option("--review", help="Approve/edit each plan and chapter.")
-    ] = False,
+        bool | None,
+        typer.Option("--review/--no-review", help="Approve/edit each plan and chapter."),
+    ] = None,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Show the estimated calls and cost only.")
     ] = False,
-    no_preview: Annotated[
-        bool, typer.Option("--no-preview", help="Hide the live prose preview.")
-    ] = False,
-    no_critic: Annotated[
-        bool, typer.Option("--no-critic", help="Skip the continuity check.")
-    ] = False,
-    no_epub: Annotated[
-        bool, typer.Option("--no-epub", help="Don't re-export the EPUB afterwards.")
-    ] = False,
+    preview: Annotated[
+        bool | None, typer.Option("--preview/--no-preview", help="Show the live prose preview.")
+    ] = None,
+    critic: Annotated[
+        bool | None, typer.Option("--critic/--no-critic", help="Run the continuity check.")
+    ] = None,
+    export_epub: Annotated[
+        bool | None,
+        typer.Option("--epub/--no-epub", help="Re-export the EPUB afterwards."),
+    ] = None,
 ) -> None:
     """Plan, write and commit new chapters."""
     app_ctx = _ctx(ctx)
     s = app_ctx.settings
-    if no_critic:
-        s.generation.critic = False
-    if no_epub:
-        s.generation.export_epub = False
+    d = s.defaults
+    count = chapters if chapters is not None else d.chapters
+    review_mode = review if review is not None else d.review
+    preview_mode = preview if preview is not None else d.preview
+    s.generation.critic = (
+        critic
+        if critic is not None
+        else (d.critic if d.critic is not None else s.generation.critic)
+    )
+    s.generation.export_epub = (
+        export_epub
+        if export_epub is not None
+        else (d.export_epub if d.export_epub is not None else s.generation.export_epub)
+    )
     book = _open_book(app_ctx, book_id)
 
     if dry_run:
@@ -358,19 +475,19 @@ def generate(
             sum(estimate_tokens(c.content) for c in recent),
             int(s.generation.max_prompt_tokens * 0.25),
         )
-        rows = estimate_generation(s, app_ctx.registry(), chapters, base, writer_prefix)
-        app_ctx.err.print(_estimate_table(f"Estimated cost for {chapters} chapter(s)", rows))
+        rows = estimate_generation(s, app_ctx.registry(), count, base, writer_prefix)
+        app_ctx.err.print(_estimate_table(f"Estimated cost for {count} chapter(s)", rows))
         return
 
-    if review and not app_ctx.err.is_terminal:
+    if review_mode and not app_ctx.err.is_terminal:
         raise NextChapError("--review needs an interactive terminal.")
-    meter = CostMeter(max_cost if max_cost is not None else s.generation.max_cost)
+    meter = CostMeter(_budget(app_ctx, max_cost))
     meter.bind(book.paths.usage, book.id)
-    reporter = app_ctx.reporter(meter, preview=not no_preview)
+    reporter = app_ctx.reporter(meter, preview=preview_mode)
     with book_lock(book.paths.lock), reporter:
-        engine = app_ctx.engine(book, meter, reporter, review=review)
+        engine = app_ctx.engine(book, meter, reporter, review=review_mode)
         with _graceful_stop(engine, app_ctx.err):
-            done = _run_with_index_guard(app_ctx, book, lambda: engine.generate(chapters))
+            done = _run_with_index_guard(app_ctx, book, lambda: engine.generate(count))
 
     app_ctx.err.print(f"[bold]{len(done)} chapter(s) added to {book.id}[/]")
     t = Table(show_edge=False)
@@ -388,57 +505,28 @@ def generate(
     app_ctx.err.print(f"Book folder: [dim]{book.paths.root}[/]")
 
 
-# ── books ─────────────────────────────────────────────────────────────────────
+# ── status ────────────────────────────────────────────────────────────────────
 
 
-@books_app.command("list")
-def books_list(ctx: typer.Context, as_json: JsonOpt = False) -> None:
-    """List all books."""
-    app_ctx = _ctx(ctx)
-    rows = [
-        manage.book_overview(Book.open(app_ctx.settings, b))
-        for b in all_book_ids(app_ctx.settings.data_root)
-    ]
-    if as_json:
-        app_ctx.out.print_json(json.dumps(rows))
-        return
-    if not rows:
-        app_ctx.err.print(
-            f"No books yet in {app_ctx.settings.data_root}. "
-            "Start with [bold]nextchap import <file>[/]."
-        )
-        return
-    t = Table(show_edge=False)
-    for col, just in (
-        ("Book ID", "left"),
-        ("Chapters", "right"),
-        ("Generated", "right"),
-        ("Size", "right"),
-        ("Modified", "left"),
-    ):
-        t.add_column(col, justify=just)  # type: ignore[arg-type]
-    for r in rows:
-        t.add_row(
-            r["book_id"],
-            str(r["chapters"]),
-            str(r["generated"]),
-            f"{r['size_mb']:.1f} MB",
-            r["modified"],
-        )
-    app_ctx.out.print(t)
-
-
-@books_app.command("info")
-def books_info(ctx: typer.Context, book_id: BookId, as_json: JsonOpt = False) -> None:
-    """Show details, world state and spend for one book."""
-    app_ctx = _ctx(ctx)
-    book = _open_book(app_ctx, book_id)
+def _render_status(app_ctx: AppContext, book: Book, as_json: bool) -> None:
     ov = manage.book_overview(book)
     spend = logged_spend(book.paths.usage)
-    ov["total_spend"] = round(spend, 6)
+    state = book.world.load() if book.world.exists() else None
+    entry = Journal(book.paths).load()
+    journal = f"chapter {entry.chapter} · {entry.step}" if entry else "clean"
+    index = _index_summary(app_ctx, book)
     if as_json:
-        state = book.world.load().model_dump(mode="json") if book.world.exists() else None
-        app_ctx.out.print_json(json.dumps({**ov, "world_state": state}))
+        app_ctx.out.print_json(
+            json.dumps(
+                {
+                    **ov,
+                    "total_spend": round(spend, 6),
+                    "world_state": state.model_dump(mode="json") if state else None,
+                    "index": _index_data(app_ctx, book),
+                    "journal": {"chapter": entry.chapter, "step": entry.step} if entry else None,
+                }
+            )
+        )
         return
     grid = Table.grid(padding=(0, 2))
     grid.add_column(style="dim")
@@ -455,47 +543,45 @@ def books_info(ctx: typer.Context, book_id: BookId, as_json: JsonOpt = False) ->
         value = ov[key]
         grid.add_row(label, f"{value} MB" if key == "size_mb" else str(value))
     grid.add_row("Total spend", money(spend))
+    grid.add_row("World state", f"after chapter {state.chapter_count}" if state else "not built")
+    grid.add_row("Index", index)
+    grid.add_row("Journal", journal)
     app_ctx.out.print(Panel(grid, title=book.id, border_style="cyan", expand=False))
-    if book.world.exists():
-        app_ctx.out.print(commands_extra.world_tree(book.world.load()))
+    if state is not None:
+        app_ctx.out.print(commands_extra.world_tree(state))
 
 
-@books_app.command("delete")
-def books_delete(
+@app.command("status", epilog=EXAMPLES["status"])
+def status_cmd(
     ctx: typer.Context,
-    book_id: BookId,
-    yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't ask for confirmation.")] = False,
+    book_id: BookId = None,
+    as_json: JsonOpt = False,
 ) -> None:
-    """Permanently delete a book and everything derived from it."""
+    """Show chapters, world state, spend, index and journal progress."""
     app_ctx = _ctx(ctx)
+    if book_id is None and len(available_books(app_ctx.settings)) != 1:
+        rows = overview_rows(app_ctx)
+        if as_json:
+            app_ctx.out.print_json(json.dumps(rows))
+            return
+        if not rows:
+            app_ctx.err.print(
+                f"No books yet in {app_ctx.settings.data_root}. "
+                "Start with [bold]nextchap import <file>[/]."
+            )
+            return
+        app_ctx.out.print(overview_table(rows))
+        return
     book = _open_book(app_ctx, book_id)
-    ov = manage.book_overview(book)
-    app_ctx.err.print(
-        f"Book [bold]{book.id}[/]: {ov['chapters']} chapters ({ov['generated']} generated), "
-        f"{ov['size_mb']:.1f} MB at {ov['path']}"
-    )
-    if not yes and not Confirm.ask("Delete it permanently?", default=False, console=app_ctx.err):
-        raise typer.Exit(1)
-    with book_lock(book.paths.lock):
-        pass
-    manage.delete_book(book)
-    app_ctx.err.print(f"[green]✓[/] Deleted {book.id}.")
+    _render_status(app_ctx, book, as_json)
 
 
-@app.command()
-def clean(
-    ctx: typer.Context,
-    book_id: BookId,
-    no_backup: Annotated[
-        bool, typer.Option("--no-backup", help="Don't write master_book.md.bak.")
-    ] = False,
-) -> None:
-    """Remove promo lines and duplicate chapter headers from master_book.md."""
-    app_ctx = _ctx(ctx)
-    book = _open_book(app_ctx, book_id)
+def _clean_book(app_ctx: AppContext, book: Book, *, no_backup: bool) -> None:
     with book_lock(book.paths.lock):
         report = manage.clean_book(
-            book, backup=not no_backup, extra_patterns=app_ctx.settings.cleanup.extra_noise_patterns
+            book,
+            backup=not no_backup,
+            extra_patterns=app_ctx.settings.cleanup.extra_noise_patterns,
         )
     if not report.changed:
         app_ctx.err.print("Nothing to clean.")
@@ -507,65 +593,21 @@ def clean(
     )
 
 
-# ── state / index / export ────────────────────────────────────────────────────
+def _rebuild_index(app_ctx: AppContext, book: Book) -> None:
+    reporter = app_ctx.reporter(CostMeter())
+    with book_lock(book.paths.lock), reporter:
+        chunks = manage.rebuild_index(book, lambda: app_ctx.store_factory(book), reporter)
+    app_ctx.err.print(f"[green]✓[/] Indexed {chunks} chunks.")
 
 
-@state_app.command("show")
-def state_show(
-    ctx: typer.Context,
-    book_id: BookId,
-    chapter: Annotated[
-        int | None, typer.Option("--chapter", help="Show the snapshot after this chapter.")
-    ] = None,
-    as_json: JsonOpt = False,
+def _rebuild_state(
+    app_ctx: AppContext,
+    book: Book,
+    *,
+    no_renumber: bool,
+    dry_run: bool,
+    no_backup: bool,
 ) -> None:
-    """Show the world state (characters, threads, rules…)."""
-    app_ctx = _ctx(ctx)
-    book = _open_book(app_ctx, book_id)
-    state = book.world.load_snapshot(chapter) if chapter else book.world.load()
-    if as_json:
-        app_ctx.out.print_json(state.model_dump_json())
-        return
-    app_ctx.out.print(commands_extra.world_tree(state))
-
-
-@state_app.command("diff")
-def state_diff(
-    ctx: typer.Context,
-    book_id: BookId,
-    from_ch: Annotated[
-        int | None, typer.Option("--from", help="Older snapshot (default: second newest).")
-    ] = None,
-    to_ch: Annotated[
-        int | None, typer.Option("--to", help="Newer snapshot (default: newest).")
-    ] = None,
-) -> None:
-    """Show what changed in the world state between two chapters."""
-    app_ctx = _ctx(ctx)
-    book = _open_book(app_ctx, book_id)
-    snaps = book.world.snapshots()
-    if len(snaps) < 2 and (from_ch is None or to_ch is None):
-        raise NextChapError("Need at least two world-state snapshots to diff.")
-    b = to_ch or snaps[-1]
-    a = from_ch or max(n for n in snaps if n < b)
-    app_ctx.out.print(
-        commands_extra.world_diff(book.world.load_snapshot(a), book.world.load_snapshot(b), a, b)
-    )
-
-
-@state_app.command("rebuild")
-def state_rebuild(
-    ctx: typer.Context,
-    book_id: BookId,
-    no_renumber: Annotated[
-        bool, typer.Option("--no-renumber", help="Keep chapter numbers.")
-    ] = False,
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Report without writing.")] = False,
-    no_backup: Annotated[bool, typer.Option("--no-backup")] = False,
-) -> None:
-    """Re-derive bookkeeping from master_book.md (fixes chapter-number drift)."""
-    app_ctx = _ctx(ctx)
-    book = _open_book(app_ctx, book_id)
     with book_lock(book.paths.lock):
         r = manage.rebuild_state(
             book, renumber=not no_renumber, dry_run=dry_run, backup=not no_backup
@@ -577,19 +619,7 @@ def state_rebuild(
     )
 
 
-@state_app.command("rollback")
-def state_rollback(
-    ctx: typer.Context,
-    book_id: BookId,
-    to: Annotated[int, typer.Option("--to", help="Restore the state saved after this chapter.")],
-    truncate: Annotated[
-        bool, typer.Option("--truncate", help="Also delete chapters after it.")
-    ] = False,
-    yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
-) -> None:
-    """Undo world-state changes (and optionally chapters) after a given chapter."""
-    app_ctx = _ctx(ctx)
-    book = _open_book(app_ctx, book_id)
+def _rollback_book(app_ctx: AppContext, book: Book, *, to: int, truncate: bool, yes: bool) -> None:
     if truncate and not yes:
         later = [c.number for c in book.master().chapters if c.number > to]
         if later and not Confirm.ask(
@@ -605,37 +635,346 @@ def state_rollback(
     )
 
 
-@index_app.command("rebuild")
-def index_rebuild(ctx: typer.Context, book_id: BookId) -> None:
-    """Re-embed every chapter (needed after changing the embedding model)."""
-    app_ctx = _ctx(ctx)
-    book = _open_book(app_ctx, book_id)
-    reporter = app_ctx.reporter(CostMeter())
-    with book_lock(book.paths.lock), reporter:
-        chunks = manage.rebuild_index(book, lambda: app_ctx.store_factory(book), reporter)
-    app_ctx.err.print(f"[green]✓[/] Indexed {chunks} chunks.")
+def _delete_book(app_ctx: AppContext, book: Book, *, yes: bool) -> None:
+    ov = manage.book_overview(book)
+    app_ctx.err.print(
+        f"Book [bold]{book.id}[/]: {ov['chapters']} chapters ({ov['generated']} generated), "
+        f"{ov['size_mb']:.1f} MB at {ov['path']}"
+    )
+    if not yes and not Confirm.ask("Delete it permanently?", default=False, console=app_ctx.err):
+        raise typer.Exit(1)
+    with book_lock(book.paths.lock):
+        pass
+    manage.delete_book(book)
+    app_ctx.err.print(f"[green]✓[/] Deleted {book.id}.")
 
 
-@export_app.command("epub")
-def export_epub(
+def _fix_findings(app_ctx: AppContext, book: Book) -> list[tuple[str, str]]:
+    findings: list[tuple[str, str]] = []
+    mb = book.master() if book.paths.master_book.exists() else None
+    chapters = mb.chapters if mb else []
+    last = chapters[-1].number if chapters else 0
+    summaries = book.summaries.load()
+    missing = [c.number for c in chapters if c.number not in summaries]
+    if missing:
+        findings.append(
+            ("summaries", f"{len(missing)} chapter(s) missing; re-summarized on the next run")
+        )
+    if book.world.exists():
+        state = book.world.load()
+        if state.chapter_count != last:
+            findings.append(
+                (
+                    "world state",
+                    f"after chapter {state.chapter_count}, master book ends at {last}",
+                )
+            )
+    entry = Journal(book.paths).load()
+    if entry is not None:
+        findings.append(("journal", f"chapter {entry.chapter} stopped at step '{entry.step}'"))
+    if book.paths.master_book.exists():
+        original = book.paths.master_book.read_text(encoding="utf-8")
+        _, report = clean_master_markdown(
+            original, NoiseFilter(app_ctx.settings.cleanup.extra_noise_patterns)
+        )
+        if report.changed:
+            findings.append(
+                (
+                    "master book",
+                    f"{report.removed_noise} noise line(s), "
+                    f"{report.removed_duplicate_headers} duplicate header(s)",
+                )
+            )
+    info = VectorStore.inspect(book.paths.index)
+    if info is None:
+        findings.append(("index", "not built; syncs automatically on the next run"))
+    elif info.unreadable:
+        findings.append(("index", "unreadable; rebuild required"))
+    else:
+        meta = info.metadata
+        if str(meta.get("embed_model")) != embedder_name(app_ctx.settings):
+            findings.append(
+                (
+                    "index",
+                    "built with a different embedding model; rebuild required",
+                )
+            )
+        elif str(meta.get("chunker")) != CHUNKER_VERSION:
+            findings.append(("index", "built with an old chunker; rebuild recommended"))
+    return findings
+
+
+@app.command("fix", epilog=EXAMPLES["fix"])
+def fix_cmd(
     ctx: typer.Context,
-    book_id: BookId,
-    output: Annotated[Path | None, typer.Option("--output", "-o", help="Output path.")] = None,
-    template: Annotated[
-        Path | None,
-        typer.Option(
-            "--template",
-            exists=True,
-            dir_okay=False,
-            help="EPUB to copy metadata, cover and styles from.",
-        ),
-    ] = None,
-    check: Annotated[
-        bool, typer.Option("--check", help="Validate with epubcheck if installed.")
+    book_id: BookId = None,
+    rebuild_index: Annotated[
+        bool, typer.Option("--rebuild-index", help="Re-embed every chapter (local only).")
+    ] = False,
+    rebuild_state: Annotated[
+        bool, typer.Option("--rebuild-state", help="Re-derive bookkeeping from master_book.md.")
+    ] = False,
+    clean: Annotated[
+        bool, typer.Option("--clean", help="Strip promo lines and duplicate headers.")
+    ] = False,
+    no_renumber: Annotated[
+        bool, typer.Option("--no-renumber", help="Keep chapter numbers during --rebuild-state.")
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Report without writing (--rebuild-state).")
+    ] = False,
+    no_backup: Annotated[bool, typer.Option("--no-backup")] = False,
+) -> None:
+    """Diagnose a book and offer numbered repairs."""
+    app_ctx = _ctx(ctx)
+    repairs = [
+        name
+        for name, selected in (
+            ("--rebuild-index", rebuild_index),
+            ("--rebuild-state", rebuild_state),
+            ("--clean", clean),
+        )
+        if selected
+    ]
+    if len(repairs) > 1:
+        raise NextChapError(
+            f"Pass one repair at a time (got {', '.join(repairs)}).",
+            hint="Use --rebuild-index, --rebuild-state or --clean.",
+        )
+    if dry_run and not rebuild_state:
+        raise NextChapError(
+            "--dry-run only applies to --rebuild-state.",
+            hint="Run `nextchap fix BOOK --rebuild-state --dry-run`.",
+        )
+    book = _open_book(app_ctx, book_id)
+    if rebuild_index:
+        _rebuild_index(app_ctx, book)
+        return
+    if rebuild_state:
+        _rebuild_state(app_ctx, book, no_renumber=no_renumber, dry_run=dry_run, no_backup=no_backup)
+        return
+    if clean:
+        _clean_book(app_ctx, book, no_backup=no_backup)
+        return
+
+    findings = _fix_findings(app_ctx, book)
+    t = Table(show_edge=False)
+    t.add_column("Check")
+    t.add_column("Finding")
+    for check, detail in findings:
+        t.add_row(check, detail)
+    if findings:
+        app_ctx.err.print(
+            Panel(t, title=f"Diagnosis: {book.id}", border_style="cyan", expand=False)
+        )
+    else:
+        app_ctx.err.print(f"[green]✓[/] {book.id}: no problems found.")
+
+    if not app_ctx.interactive:
+        app_ctx.err.print(
+            "[dim]Non-interactive: pass --rebuild-index, --rebuild-state or --clean.[/]"
+        )
+        return
+
+    snapshots = book.world.snapshots()
+    actions: list[tuple[str, str]] = [
+        ("index", "Rebuild the retrieval index (local only)"),
+        ("state", "Rebuild bookkeeping from master_book.md"),
+        ("clean", "Clean master_book.md (promo lines / duplicate headers)"),
+    ]
+    if snapshots:
+        actions.append(("rollback", "Roll back the world state to a snapshot"))
+    actions.append(("delete", "Delete this book permanently (asks first)"))
+    actions.append(("cancel", "Cancel"))
+    choice_table = Table(show_header=False, box=None, pad_edge=False)
+    choice_table.add_column("#", justify="right", style="dim")
+    choice_table.add_column("Repair")
+    for i, (_, label) in enumerate(actions, 1):
+        choice_table.add_row(str(i), label)
+    app_ctx.err.print(choice_table)
+    answer = Prompt.ask(
+        "Repair",
+        choices=[str(i) for i in range(1, len(actions) + 1)],
+        default=str(len(actions)),
+        console=app_ctx.err,
+        show_choices=False,
+    )
+    action = actions[int(answer) - 1][0]
+    if action == "index":
+        _rebuild_index(app_ctx, book)
+    elif action == "state":
+        _rebuild_state(app_ctx, book, no_renumber=no_renumber, dry_run=dry_run, no_backup=no_backup)
+    elif action == "clean":
+        _clean_book(app_ctx, book, no_backup=no_backup)
+    elif action == "rollback":
+        allowed = [str(n) for n in snapshots]
+        chapter = Prompt.ask(
+            "Restore the world state saved after chapter",
+            choices=allowed,
+            default=allowed[-1],
+            console=app_ctx.err,
+            show_choices=False,
+        )
+        truncate = Confirm.ask("Also delete chapters after it?", default=False, console=app_ctx.err)
+        _rollback_book(app_ctx, book, to=int(chapter), truncate=truncate, yes=True)
+    elif action == "delete":
+        _delete_book(app_ctx, book, yes=False)
+
+
+# ── hidden legacy commands ────────────────────────────────────────────────────
+
+
+@books_app.command("list")
+def books_list(ctx: typer.Context, as_json: JsonOpt = False) -> None:
+    """List all books (deprecated: use `nextchap status`)."""
+    app_ctx = _ctx(ctx)
+    _deprecated(app_ctx, "nextchap books list", "nextchap status")
+    rows = overview_rows(app_ctx)
+    if as_json:
+        app_ctx.out.print_json(json.dumps(rows))
+        return
+    if not rows:
+        app_ctx.err.print(
+            f"No books yet in {app_ctx.settings.data_root}. "
+            "Start with [bold]nextchap import <file>[/]."
+        )
+        return
+    app_ctx.out.print(overview_table(rows))
+
+
+@books_app.command("info")
+def books_info(ctx: typer.Context, book_id: BookId = None, as_json: JsonOpt = False) -> None:
+    """Show details for one book (deprecated: use `nextchap status BOOK`)."""
+    app_ctx = _ctx(ctx)
+    _deprecated(app_ctx, "nextchap books info", "nextchap status BOOK")
+    book = _open_book(app_ctx, book_id)
+    _render_status(app_ctx, book, as_json)
+
+
+@books_app.command("delete")
+def books_delete(
+    ctx: typer.Context,
+    book_id: BookId = None,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't ask for confirmation.")] = False,
+) -> None:
+    """Permanently delete a book and everything derived from it."""
+    app_ctx = _ctx(ctx)
+    _deprecated(app_ctx, "nextchap books delete", "nextchap fix (delete action)")
+    book = _open_book(app_ctx, book_id, require_exact=True)
+    _delete_book(app_ctx, book, yes=yes)
+
+
+@app.command("clean", hidden=True)
+def clean(
+    ctx: typer.Context,
+    book_id: BookId = None,
+    no_backup: Annotated[
+        bool, typer.Option("--no-backup", help="Don't write master_book.md.bak.")
     ] = False,
 ) -> None:
-    """Build an EPUB from master_book.md."""
+    """Remove promo lines and duplicate chapter headers from master_book.md."""
     app_ctx = _ctx(ctx)
+    _deprecated(app_ctx, "nextchap clean", "nextchap fix --clean")
+    _clean_book(app_ctx, _open_book(app_ctx, book_id), no_backup=no_backup)
+
+
+@state_app.command("show")
+def state_show(
+    ctx: typer.Context,
+    book_id: BookId = None,
+    chapter: Annotated[
+        int | None, typer.Option("--chapter", help="Show the snapshot after this chapter.")
+    ] = None,
+    as_json: JsonOpt = False,
+) -> None:
+    """Show the world state (characters, threads, rules…)."""
+    app_ctx = _ctx(ctx)
+    _deprecated(app_ctx, "nextchap state show", "nextchap status BOOK")
+    book = _open_book(app_ctx, book_id)
+    state = book.world.load_snapshot(chapter) if chapter else book.world.load()
+    if as_json:
+        app_ctx.out.print_json(state.model_dump_json())
+        return
+    app_ctx.out.print(commands_extra.world_tree(state))
+
+
+@state_app.command("diff")
+def state_diff(
+    ctx: typer.Context,
+    book_id: BookId = None,
+    from_ch: Annotated[
+        int | None, typer.Option("--from", help="Older snapshot (default: second newest).")
+    ] = None,
+    to_ch: Annotated[
+        int | None, typer.Option("--to", help="Newer snapshot (default: newest).")
+    ] = None,
+) -> None:
+    """Show what changed in the world state between two chapters."""
+    app_ctx = _ctx(ctx)
+    _deprecated(app_ctx, "nextchap state diff", "nextchap status BOOK")
+    book = _open_book(app_ctx, book_id)
+    snaps = book.world.snapshots()
+    if len(snaps) < 2 and (from_ch is None or to_ch is None):
+        raise NextChapError("Need at least two world-state snapshots to diff.")
+    b = to_ch or snaps[-1]
+    a = from_ch or max(n for n in snaps if n < b)
+    app_ctx.out.print(
+        commands_extra.world_diff(book.world.load_snapshot(a), book.world.load_snapshot(b), a, b)
+    )
+
+
+@state_app.command("rebuild")
+def state_rebuild(
+    ctx: typer.Context,
+    book_id: BookId = None,
+    no_renumber: Annotated[
+        bool, typer.Option("--no-renumber", help="Keep chapter numbers.")
+    ] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Report without writing.")] = False,
+    no_backup: Annotated[bool, typer.Option("--no-backup")] = False,
+) -> None:
+    """Re-derive bookkeeping from master_book.md (fixes chapter-number drift)."""
+    app_ctx = _ctx(ctx)
+    _deprecated(app_ctx, "nextchap state rebuild", "nextchap fix --rebuild-state")
+    book = _open_book(app_ctx, book_id)
+    _rebuild_state(app_ctx, book, no_renumber=no_renumber, dry_run=dry_run, no_backup=no_backup)
+
+
+@state_app.command("rollback")
+def state_rollback(
+    ctx: typer.Context,
+    to: Annotated[int, typer.Option("--to", help="Restore the state saved after this chapter.")],
+    book_id: BookId = None,
+    truncate: Annotated[
+        bool, typer.Option("--truncate", help="Also delete chapters after it.")
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
+) -> None:
+    """Undo world-state changes (and optionally chapters) after a given chapter."""
+    app_ctx = _ctx(ctx)
+    _deprecated(app_ctx, "nextchap state rollback", "nextchap fix")
+    book = _open_book(app_ctx, book_id)
+    _rollback_book(app_ctx, book, to=to, truncate=truncate, yes=yes)
+
+
+@index_app.command("rebuild")
+def index_rebuild(ctx: typer.Context, book_id: BookId = None) -> None:
+    """Re-embed every chapter (needed after changing the embedding model)."""
+    app_ctx = _ctx(ctx)
+    _deprecated(app_ctx, "nextchap index rebuild", "nextchap fix --rebuild-index")
+    _rebuild_index(app_ctx, _open_book(app_ctx, book_id))
+
+
+# ── export ────────────────────────────────────────────────────────────────────
+
+
+def _export(
+    app_ctx: AppContext,
+    book_id: str | None,
+    output: Path | None,
+    template: Path | None,
+    check: bool,
+) -> None:
     book = _open_book(app_ctx, book_id)
     out = write_book_epub(book, output, template)
     app_ctx.err.print(f"[green]✓[/] Wrote {out}")
@@ -655,7 +994,64 @@ def export_epub(
                 raise typer.Exit(1)
 
 
+@app.command("export", epilog=EXAMPLES["export"])
+def export_cmd(
+    ctx: typer.Context,
+    targets: Annotated[
+        list[str] | None,
+        typer.Argument(
+            help="Optional book ID. The old `export epub BOOK` form is still accepted.",
+            autocompletion=complete_book_id,
+        ),
+    ] = None,
+    output: Annotated[Path | None, typer.Option("--output", "-o", help="Output path.")] = None,
+    template: Annotated[
+        Path | None,
+        typer.Option(
+            "--template",
+            exists=True,
+            dir_okay=False,
+            help="EPUB to copy metadata, cover and styles from.",
+        ),
+    ] = None,
+    check: Annotated[
+        bool, typer.Option("--check", help="Validate with epubcheck if installed.")
+    ] = False,
+) -> None:
+    """Build an EPUB from master_book.md."""
+    app_ctx = _ctx(ctx)
+    args = list(targets or [])
+    if args and args[0] == "epub":
+        _deprecated(app_ctx, "nextchap export epub", "nextchap export")
+        args = args[1:]
+    if len(args) > 1:
+        raise NextChapError(
+            f"Too many book IDs: {' '.join(args)}.", hint="Pass one book: nextchap export BOOK"
+        )
+    _export(app_ctx, args[0] if args else None, output, template, check)
+
+
 # ── entry point ───────────────────────────────────────────────────────────────
+
+
+def _command_names() -> list[str]:
+    names: set[str] = set()
+    for cmd in app.registered_commands:
+        name = cmd.name or (cmd.callback.__name__ if cmd.callback else "")
+        if name:
+            names.add(name)
+    for group in app.registered_groups:
+        if group.name:
+            names.add(group.name)
+    return sorted(names)
+
+
+def _suggest_command(message: str) -> str | None:
+    match = re.search(r"No such command ['\"]([^'\"]+)['\"]", message)
+    if not match:
+        return None
+    matches = get_close_matches(match.group(1), _command_names(), n=1, cutoff=0.5)
+    return matches[0] if matches else None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -688,6 +1084,11 @@ def main(argv: list[str] | None = None) -> int:
         except ImportError:
             pass
         if isinstance(exc, click_exc):
+            suggestion = _suggest_command(str(exc))
+            if suggestion:
+                err.print(f"Error: {exc}")
+                err.print(f"[cyan]Did you mean[/] [bold]nextchap {suggestion}[/]?")
+                return 2
             exc.show()
             return int(exc.exit_code)
         log.exception("Unexpected error")
