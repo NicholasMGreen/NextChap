@@ -38,10 +38,14 @@ nextchap config set retrieval.embed_backend remote
 ## Quick start
 
 ```bash
-nextchap import my_novel.epub --book-id my_story   # shows detected chapters + cost, then builds memory
-nextchap generate my_story -n 3                     # plans, writes, checks and commits 3 chapters
-nextchap books info my_story                        # overview, world state, total spend
+nextchap import my_novel.epub    # detects chapters + shows the cost, then builds memory
+nextchap generate                # one chapter (or set [defaults] chapters = 3)
+nextchap status                  # chapters, world state, spend, index, journal
 ```
+
+Run `nextchap` with no arguments to get a book picker and an action menu. Book
+IDs are fuzzy: `nextchap generate deadp` finds `deadpool_twilight_v2`, and
+omitting the ID picks the only book (or asks when there are several).
 
 While it runs you see a progress bar for each phase, a live preview of the prose as it streams, and a footer with spend, tokens, and cache hit rate. Press Ctrl-C once to stop at the next safe point, or twice to abort. Re-running the same command resumes from the last completed step, whether you stopped it yourself or it crashed.
 
@@ -51,36 +55,47 @@ Useful flags:
 |---|---|
 | `--dry-run` | Show the planned calls, tokens and cost; spend nothing |
 | `--max-cost 0.50` | Never spend past this; stops between chapters when the next one would exceed it |
-| `--review` | Approve, edit in `$EDITOR`, or regenerate each plan and each chapter |
-| `--no-critic` | Skip the continuity check |
-| `--no-preview` | Hide the streaming preview |
+| `--review` / `--no-review` | Approve, edit in `$EDITOR`, or regenerate each plan and each chapter |
+| `--critic` / `--no-critic` | Run or skip the continuity check |
+| `--preview` / `--no-preview` | Show or hide the streaming preview |
+| `--epub` / `--no-epub` | Re-export the EPUB afterwards, or don't |
 | `--plain` | Plain log lines (automatic when output isn't a terminal) |
-| `--json` | Machine-readable output for `books list/info`, `state show`, `models`, `doctor`, `config show` |
+| `--json` | Machine-readable output for `status`, `models`, `doctor`, `config show` |
 
 ## Commands
 
 ```
+nextchap                         # interactive book → action menu
 nextchap import FILE [--book-id ID] [--dry-run] [--yes] [--force] [--max-cost N]
-nextchap generate BOOK [-n N] [--max-cost N] [--review] [--dry-run] [--no-critic] [--no-epub]
-nextchap books list | info BOOK | delete BOOK [--yes]
-nextchap clean BOOK [--no-backup]                 # strip promo lines / duplicate headers
-nextchap state show BOOK [--chapter N] | diff BOOK [--from A --to B]
-nextchap state rollback BOOK --to N [--truncate]  # undo world-state (and chapters) after N
-nextchap state rebuild BOOK [--no-renumber] [--dry-run]
-nextchap index rebuild BOOK                       # re-embed (local, no API cost)
-nextchap export epub BOOK [-o PATH] [--template EPUB] [--check]
-nextchap models [--refresh]                       # model per role, live price, availability
+nextchap generate [BOOK] [-n N] [--max-cost N] [--review] [--dry-run]
+nextchap status [BOOK] [--json]  # overview, world state, spend, index, journal
+nextchap fix [BOOK]              # diagnose + numbered repairs, or --rebuild-index
+                                 #   --rebuild-state / --clean for scripts
+nextchap export [BOOK] [-o PATH] [--template EPUB] [--check]
+nextchap models [--refresh]      # model per role, live price, availability
 nextchap doctor
 nextchap config show | path | set KEY VALUE [--project] | set-key
 ```
 
-Shell completion (including book IDs): `nextchap --install-completion`.
+Older names (`books`, `state`, `index`, `clean`, `export epub`) still work as
+hidden aliases with a one-line deprecation pointer.
+
+Shell completion (including book IDs): `nextchap --install-completion`. `doctor`
+reports whether completion is installed.
 
 ## Configuration
 
 Settings are layered, highest priority first: CLI flags, `NEXTCHAP_*` environment variables (nested with `__`, e.g. `NEXTCHAP_GENERATION__MIN_WORDS=1200`), `.env`, `./nextchap.toml`, then the user config (`nextchap config path`). Example `nextchap.toml`:
 
 ```toml
+[defaults]
+chapters = 3             # default for `nextchap generate`
+max_cost = 1.00          # always-on budget guard
+review = false           # was --review
+preview = true           # was --no-preview
+critic = true            # was --no-critic
+export_epub = true       # was --no-epub
+
 [generation]
 target_words = [1800, 2400]
 min_words = 1200
@@ -102,7 +117,12 @@ rerank = false           # true needs: uv tool install ".[local-embed,rerank]"
 extra_noise_patterns = ["^translator'?s note"]
 ```
 
-Any OpenRouter model ID works for any role. The client reads each model's supported parameters from OpenRouter and only sends what that model accepts. Changing `retrieval.embed_model` means you need to run `nextchap index rebuild`; NextChap detects the mismatch and offers to do it.
+CLI flags beat `[defaults]`, which beats the built-in defaults. For backwards
+compatibility, `generation.max_cost`, `generation.critic` and
+`generation.export_epub` still act as fallbacks when the matching `[defaults]`
+key is unset.
+
+Any OpenRouter model ID works for any role. The client reads each model's supported parameters from OpenRouter and only sends what that model accepts. Changing `retrieval.embed_model` means you need to rebuild the index: `nextchap fix --rebuild-index`; NextChap detects the mismatch and offers to do it.
 
 ## How it works
 
@@ -152,7 +172,7 @@ logs/nextchap.log           full debug log (tracebacks land here)
 - **Empty answers or "spent on hidden reasoning":** lower the role's `reasoning` setting (`none` or `low`).
 - **The model refuses dark content:** point the writer role at another model, e.g. `nextchap config set models.writer.model deepseek/deepseek-v4.1-flash-1017`. A content-filter refusal is automatically retried once on the fallback model.
 - **"Book is locked":** another `nextchap` process is working on that book.
-- **Wrong chapter splits:** look at the anomalies list in `import --dry-run`. Fix the source or `master_book.md`, then run `nextchap state rebuild`.
+- **Wrong chapter splits:** look at the anomalies list in `import --dry-run`. Fix the source or `master_book.md`, then run `nextchap fix --rebuild-state`.
 
 ## Development
 

@@ -94,7 +94,15 @@ lines every tick (spinner, elapsed time), so if any residual flicker shows up
 next to the preview, raising `refresh_per_second` down or freezing the spinner
 are the next knobs.
 
-## 5. Non-bugs worth knowing (no action needed)
+## 5. CLI command sprawl and cold "book not found" errors — ADDRESSED
+
+**Status:** implemented in `docs/CLI_SIMPLIFICATION_PLAN.md`. The visible surface
+is now `import`, `generate`, `status`, `fix`, `export`, `models`, `doctor`,
+`config`; bare `nextchap` opens a book/action menu. Book IDs accept exact,
+prefix and fuzzy matches, and most flags have `[defaults]` in `nextchap.toml`.
+Legacy command names remain hidden aliases with a deprecation pointer.
+
+## 6. Non-bugs worth knowing (no action needed)
 
 - `books info` shows `Title: Fake Deadpool In Twilight` — that string is the
   literal `<dc:title>` inside `Deadpool_Twilight_V2.epub`'s `content.opf`,

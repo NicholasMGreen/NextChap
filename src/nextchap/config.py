@@ -72,6 +72,18 @@ class ModelsConfig(BaseModel):
         }
 
 
+class DefaultsConfig(BaseModel):
+    """Personal defaults for the most common CLI choices (``nextchap.toml [defaults]``)."""
+
+    chapters: int = Field(default=1, ge=1)
+    max_cost: float | None = Field(default=None, ge=0)
+    review: bool = False
+    preview: bool = True
+    # Optional so an explicit false in [generation] keeps working when [defaults] is unset.
+    critic: bool | None = None
+    export_epub: bool | None = None
+
+
 class GenerationConfig(BaseModel):
     target_words: tuple[int, int] = (1500, 2000)
     min_words: int = 900
@@ -129,6 +141,7 @@ class Settings(BaseSettings):
     )
     data_dir: Path | None = None
     models: ModelsConfig = ModelsConfig()
+    defaults: DefaultsConfig = DefaultsConfig()
     generation: GenerationConfig = GenerationConfig()
     retrieval: RetrievalConfig = RetrievalConfig()
     cleanup: CleanupConfig = CleanupConfig()

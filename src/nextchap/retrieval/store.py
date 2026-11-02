@@ -136,6 +136,20 @@ class VectorStore:
             shutil.rmtree(path, ignore_errors=True)
             SharedSystemClient.clear_system_cache()
 
+    @staticmethod
+    def inspect(path: Path) -> tuple[int, dict[str, Any]] | None:
+        """Read index metadata without constructing an embedder (for status output)."""
+        if not path.exists():
+            return None
+        try:
+            client = chromadb.PersistentClient(
+                path=str(path), settings=ChromaSettings(anonymized_telemetry=False)
+            )
+            col = client.get_collection(COLLECTION, embedding_function=None)
+        except Exception:
+            return None
+        return int(col.count()), dict(col.metadata or {})
+
     def count(self) -> int:
         return int(self._col.count())
 
