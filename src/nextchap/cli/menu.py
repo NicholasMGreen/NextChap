@@ -7,46 +7,14 @@ runs generation or writes book files itself.
 
 from __future__ import annotations
 
-from typing import Any
-
 from rich.prompt import Prompt
 from rich.table import Table
 from rich.text import Text
 
 from nextchap.cli.context import AppContext
+from nextchap.cli.overview import overview_rows, overview_table
 from nextchap.cli.resolve import available_books
 from nextchap.cli.ui import money
-from nextchap.llm.cost import logged_spend
-from nextchap.pipeline.book import Book
-from nextchap.pipeline.manage import book_overview
-
-
-def _overview_rows(app_ctx: AppContext, ids: list[str]) -> list[dict[str, Any]]:
-    rows = []
-    for book_id in ids:
-        book = Book.open(app_ctx.settings, book_id)
-        row = book_overview(book)
-        row["spend"] = logged_spend(book.paths.usage)
-        rows.append(row)
-    return rows
-
-
-def _book_table(rows: list[dict[str, Any]]) -> Table:
-    table = Table(show_header=False, box=None, pad_edge=False)
-    table.add_column("#", justify="right", style="dim")
-    table.add_column("Book ID", style="bold")
-    table.add_column("Chapters", justify="right")
-    table.add_column("Generated", justify="right", style="dim")
-    table.add_column("Spend", justify="right", style="dim")
-    for i, row in enumerate(rows, 1):
-        table.add_row(
-            str(i),
-            str(row["book_id"]),
-            str(row["chapters"]),
-            str(row["generated"]),
-            money(float(row["spend"])),
-        )
-    return table
 
 
 def run_menu(app_ctx: AppContext) -> list[str] | None:
@@ -62,15 +30,15 @@ def run_menu(app_ctx: AppContext) -> list[str] | None:
             )
         )
         return None
-    rows = _overview_rows(app_ctx, ids)
-    total_spend = sum(float(row["spend"]) for row in rows)
+    rows = overview_rows(app_ctx)
+    total_spend = sum(float(row["total_spend"]) for row in rows)
     app_ctx.err.print(
         Text.assemble(
             ("NextChap", "bold"),
             f" — {len(ids)} book{'s' if len(ids) != 1 else ''} · {money(total_spend)} total spend",
         )
     )
-    app_ctx.err.print(_book_table(rows))
+    app_ctx.err.print(overview_table(rows))
 
     def choose_book() -> str:
         if len(ids) == 1:
@@ -126,7 +94,7 @@ def run_menu(app_ctx: AppContext) -> list[str] | None:
         if choice == 4:
             return ["export", chosen]
         if choice == 5:
-            app_ctx.err.print(_book_table(rows))
+            app_ctx.err.print(overview_table(rows))
             chosen = choose_book()
             continue
         return None

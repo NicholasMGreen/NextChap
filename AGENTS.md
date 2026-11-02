@@ -73,10 +73,11 @@ docs/MODERNIZATION_PLAN.md            design rationale
 `nextchap` (no args) opens the book/action menu. The visible verbs are
 `import`, `generate`, `status`, `fix`, `export`, `models`, `doctor`, `config`.
 Book arguments are optional and resolved through `cli/resolve.py`
-(exact → prefix → fuzzy → picker). `books`, `state`, `index`, `clean` and
-`export epub` remain hidden legacy aliases. `[defaults]` in `nextchap.toml`
-sets recurring choices (`chapters`, `max_cost`, `review`, `preview`, `critic`,
-`export_epub`); CLI flags always win.
+(exact → prefix → fuzzy → picker; case/space-insensitive). `books`, `state`,
+`index`, `clean` and `export epub` remain hidden legacy aliases. Deletion is in
+the `fix` menu; hidden `books delete` requires an exact ID. `[defaults]` in
+`nextchap.toml` sets recurring choices (`chapters`, `max_cost`, `review`,
+`preview`, `critic`, `export_epub`); CLI flags always win.
 
 ## Conventions
 

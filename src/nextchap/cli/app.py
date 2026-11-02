@@ -25,6 +25,7 @@ from nextchap import __version__
 from nextchap.cli import commands_extra
 from nextchap.cli.context import AppContext
 from nextchap.cli.menu import run_menu
+from nextchap.cli.overview import overview_rows, overview_table
 from nextchap.cli.resolve import available_books, resolve_book
 from nextchap.cli.ui import error_panel, money
 from nextchap.config import Settings
@@ -41,7 +42,8 @@ from nextchap.pipeline.engine import export_epub as write_book_epub
 from nextchap.pipeline.estimate import EstimateRow, estimate_generation, estimate_import, total
 from nextchap.pipeline.journal import Journal
 from nextchap.retrieval.context import estimate_tokens
-from nextchap.retrieval.store import VectorStore
+from nextchap.retrieval.embed import embedder_name
+from nextchap.retrieval.store import CHUNKER_VERSION, VectorStore
 from nextchap.storage.lock import book_lock
 from nextchap.storage.paths import all_book_ids, slugify, validate_book_id
 
@@ -163,12 +165,13 @@ def root(
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 
-def _open_book(app_ctx: AppContext, book_id: str | None) -> Book:
+def _open_book(app_ctx: AppContext, book_id: str | None, *, require_exact: bool = False) -> Book:
     paths = resolve_book(
         app_ctx.settings,
         book_id,
         console=app_ctx.err,
         interactive=app_ctx.interactive,
+        require_exact=require_exact,
     )
     return Book(paths, app_ctx.settings)
 
@@ -290,28 +293,42 @@ def _detection_panel(report: DetectionReport, file: Path) -> Panel:
     return Panel(Group(*items), title="Detected chapters", border_style="cyan", expand=False)
 
 
-def _expected_embedder_name(settings: Settings) -> str:
-    r = settings.retrieval
-    if r.embed_backend == "hash":
-        return "hash-256"
-    if r.embed_backend == "remote":
-        return f"remote:{r.remote_embed_model}"
-    return r.embed_model
+def _index_data(app_ctx: AppContext, book: Book) -> dict[str, Any] | None:
+    info = VectorStore.inspect(book.paths.index)
+    if info is None:
+        return None
+    expected = embedder_name(app_ctx.settings)
+    model = str(info.metadata.get("embed_model", "?"))
+    chunker = str(info.metadata.get("chunker", "?"))
+    ok = not info.unreadable and model == expected and chunker == CHUNKER_VERSION
+    data: dict[str, Any] = {
+        "chunks": info.chunks,
+        "embed_model": model,
+        "chunker": chunker,
+        "ok": ok,
+    }
+    if info.unreadable:
+        data["error"] = str(info.metadata.get("error", "unreadable"))
+    elif model != expected:
+        data["expected_embed_model"] = expected
+    elif chunker != CHUNKER_VERSION:
+        data["expected_chunker"] = CHUNKER_VERSION
+    return data
 
 
 def _index_summary(app_ctx: AppContext, book: Book) -> str:
-    info = VectorStore.inspect(book.paths.index)
-    if info is None:
+    data = _index_data(app_ctx, book)
+    if data is None:
         return "not built (syncs on the next run)"
-    chunks, meta = info
-    model = str(meta.get("embed_model", "?"))
-    chunker = str(meta.get("chunker", "?"))
-    state = (
-        "ok"
-        if model == _expected_embedder_name(app_ctx.settings)
-        else f"[yellow]mismatch: settings use {_expected_embedder_name(app_ctx.settings)}[/]"
-    )
-    return f"{chunks:,} chunks · {model} · {chunker} · {state}"
+    if data.get("error"):
+        return "unreadable; run [bold]nextchap fix --rebuild-index[/]"
+    state = "ok"
+    if not data["ok"]:
+        if data.get("expected_embed_model"):
+            state = f"[yellow]mismatch: settings use {data['expected_embed_model']}[/]"
+        else:
+            state = f"[yellow]old chunker; expected {data.get('expected_chunker')}[/]"
+    return f"{data['chunks']:,} chunks · {data['embed_model']} · {data['chunker']} · {state}"
 
 
 # ── import / generate ─────────────────────────────────────────────────────────
@@ -353,24 +370,12 @@ def import_cmd(
     app_ctx.err.print(_estimate_table("Estimated import cost", rows))
     if dry_run:
         return
-    if not yes:
-        if not app_ctx.err.is_terminal:
-            # Non-interactive contexts default to yes; scripts no longer need --yes.
-            pass
-        elif not app_ctx.interactive:
-            raise NextChapError(
-                "Confirmation needed.", hint="Re-run with --yes to import with --plain."
-            )
-        else:
-            prompt = (
-                f"Import {len(report.chapters)} chapters as '{bid}' (about {money(total(rows))})?"
-            )
-            if book.exists():
-                prompt = (
-                    f"Replace existing book '{bid}' and import {len(report.chapters)} chapters?"
-                )
-            if not Confirm.ask(prompt, default=True, console=app_ctx.err):
-                raise typer.Exit(1)
+    if not yes and app_ctx.interactive:
+        prompt = f"Import {len(report.chapters)} chapters as '{bid}' (about {money(total(rows))})?"
+        if book.exists():
+            prompt = f"Replace existing book '{bid}' and import {len(report.chapters)} chapters?"
+        if not Confirm.ask(prompt, default=True, console=app_ctx.err):
+            raise typer.Exit(1)
     if book.exists():
         manage.delete_book(book)
 
@@ -503,39 +508,6 @@ def generate(
 # ── status ────────────────────────────────────────────────────────────────────
 
 
-def _overview_rows(app_ctx: AppContext) -> list[dict[str, Any]]:
-    rows = []
-    for book_id in available_books(app_ctx.settings):
-        book = Book.open(app_ctx.settings, book_id)
-        row = manage.book_overview(book)
-        row["total_spend"] = round(logged_spend(book.paths.usage), 6)
-        rows.append(row)
-    return rows
-
-
-def _overview_table(rows: list[dict[str, Any]]) -> Table:
-    t = Table(show_edge=False)
-    for col, just in (
-        ("Book ID", "left"),
-        ("Chapters", "right"),
-        ("Generated", "right"),
-        ("Spend", "right"),
-        ("Size", "right"),
-        ("Modified", "left"),
-    ):
-        t.add_column(col, justify=just)  # type: ignore[arg-type]
-    for r in rows:
-        t.add_row(
-            str(r["book_id"]),
-            str(r["chapters"]),
-            str(r["generated"]),
-            money(float(r["total_spend"])),
-            f"{r['size_mb']:.1f} MB",
-            str(r["modified"]),
-        )
-    return t
-
-
 def _render_status(app_ctx: AppContext, book: Book, as_json: bool) -> None:
     ov = manage.book_overview(book)
     spend = logged_spend(book.paths.usage)
@@ -550,8 +522,8 @@ def _render_status(app_ctx: AppContext, book: Book, as_json: bool) -> None:
                     **ov,
                     "total_spend": round(spend, 6),
                     "world_state": state.model_dump(mode="json") if state else None,
-                    "index": index,
-                    "journal": journal,
+                    "index": _index_data(app_ctx, book),
+                    "journal": {"chapter": entry.chapter, "step": entry.step} if entry else None,
                 }
             )
         )
@@ -588,7 +560,7 @@ def status_cmd(
     """Show chapters, world state, spend, index and journal progress."""
     app_ctx = _ctx(ctx)
     if book_id is None and len(available_books(app_ctx.settings)) != 1:
-        rows = _overview_rows(app_ctx)
+        rows = overview_rows(app_ctx)
         if as_json:
             app_ctx.out.print_json(json.dumps(rows))
             return
@@ -598,7 +570,7 @@ def status_cmd(
                 "Start with [bold]nextchap import <file>[/]."
             )
             return
-        app_ctx.out.print(_overview_table(rows))
+        app_ctx.out.print(overview_table(rows))
         return
     book = _open_book(app_ctx, book_id)
     _render_status(app_ctx, book, as_json)
@@ -663,6 +635,20 @@ def _rollback_book(app_ctx: AppContext, book: Book, *, to: int, truncate: bool, 
     )
 
 
+def _delete_book(app_ctx: AppContext, book: Book, *, yes: bool) -> None:
+    ov = manage.book_overview(book)
+    app_ctx.err.print(
+        f"Book [bold]{book.id}[/]: {ov['chapters']} chapters ({ov['generated']} generated), "
+        f"{ov['size_mb']:.1f} MB at {ov['path']}"
+    )
+    if not yes and not Confirm.ask("Delete it permanently?", default=False, console=app_ctx.err):
+        raise typer.Exit(1)
+    with book_lock(book.paths.lock):
+        pass
+    manage.delete_book(book)
+    app_ctx.err.print(f"[green]✓[/] Deleted {book.id}.")
+
+
 def _fix_findings(app_ctx: AppContext, book: Book) -> list[tuple[str, str]]:
     findings: list[tuple[str, str]] = []
     mb = book.master() if book.paths.master_book.exists() else None
@@ -702,16 +688,18 @@ def _fix_findings(app_ctx: AppContext, book: Book) -> list[tuple[str, str]]:
     info = VectorStore.inspect(book.paths.index)
     if info is None:
         findings.append(("index", "not built; syncs automatically on the next run"))
+    elif info.unreadable:
+        findings.append(("index", "unreadable; rebuild required"))
     else:
-        _, meta = info
-        if str(meta.get("embed_model")) != _expected_embedder_name(app_ctx.settings):
+        meta = info.metadata
+        if str(meta.get("embed_model")) != embedder_name(app_ctx.settings):
             findings.append(
                 (
                     "index",
                     "built with a different embedding model; rebuild required",
                 )
             )
-        elif str(meta.get("chunker")) != "scene-v1":
+        elif str(meta.get("chunker")) != CHUNKER_VERSION:
             findings.append(("index", "built with an old chunker; rebuild recommended"))
     return findings
 
@@ -739,6 +727,25 @@ def fix_cmd(
 ) -> None:
     """Diagnose a book and offer numbered repairs."""
     app_ctx = _ctx(ctx)
+    repairs = [
+        name
+        for name, selected in (
+            ("--rebuild-index", rebuild_index),
+            ("--rebuild-state", rebuild_state),
+            ("--clean", clean),
+        )
+        if selected
+    ]
+    if len(repairs) > 1:
+        raise NextChapError(
+            f"Pass one repair at a time (got {', '.join(repairs)}).",
+            hint="Use --rebuild-index, --rebuild-state or --clean.",
+        )
+    if dry_run and not rebuild_state:
+        raise NextChapError(
+            "--dry-run only applies to --rebuild-state.",
+            hint="Run `nextchap fix BOOK --rebuild-state --dry-run`.",
+        )
     book = _open_book(app_ctx, book_id)
     if rebuild_index:
         _rebuild_index(app_ctx, book)
@@ -777,6 +784,7 @@ def fix_cmd(
     ]
     if snapshots:
         actions.append(("rollback", "Roll back the world state to a snapshot"))
+    actions.append(("delete", "Delete this book permanently (asks first)"))
     actions.append(("cancel", "Cancel"))
     choice_table = Table(show_header=False, box=None, pad_edge=False)
     choice_table.add_column("#", justify="right", style="dim")
@@ -809,6 +817,8 @@ def fix_cmd(
         )
         truncate = Confirm.ask("Also delete chapters after it?", default=False, console=app_ctx.err)
         _rollback_book(app_ctx, book, to=int(chapter), truncate=truncate, yes=True)
+    elif action == "delete":
+        _delete_book(app_ctx, book, yes=False)
 
 
 # ── hidden legacy commands ────────────────────────────────────────────────────
@@ -819,7 +829,7 @@ def books_list(ctx: typer.Context, as_json: JsonOpt = False) -> None:
     """List all books (deprecated: use `nextchap status`)."""
     app_ctx = _ctx(ctx)
     _deprecated(app_ctx, "nextchap books list", "nextchap status")
-    rows = _overview_rows(app_ctx)
+    rows = overview_rows(app_ctx)
     if as_json:
         app_ctx.out.print_json(json.dumps(rows))
         return
@@ -829,7 +839,7 @@ def books_list(ctx: typer.Context, as_json: JsonOpt = False) -> None:
             "Start with [bold]nextchap import <file>[/]."
         )
         return
-    app_ctx.out.print(_overview_table(rows))
+    app_ctx.out.print(overview_table(rows))
 
 
 @books_app.command("info")
@@ -849,18 +859,9 @@ def books_delete(
 ) -> None:
     """Permanently delete a book and everything derived from it."""
     app_ctx = _ctx(ctx)
-    book = _open_book(app_ctx, book_id)
-    ov = manage.book_overview(book)
-    app_ctx.err.print(
-        f"Book [bold]{book.id}[/]: {ov['chapters']} chapters ({ov['generated']} generated), "
-        f"{ov['size_mb']:.1f} MB at {ov['path']}"
-    )
-    if not yes and not Confirm.ask("Delete it permanently?", default=False, console=app_ctx.err):
-        raise typer.Exit(1)
-    with book_lock(book.paths.lock):
-        pass
-    manage.delete_book(book)
-    app_ctx.err.print(f"[green]✓[/] Deleted {book.id}.")
+    _deprecated(app_ctx, "nextchap books delete", "nextchap fix (delete action)")
+    book = _open_book(app_ctx, book_id, require_exact=True)
+    _delete_book(app_ctx, book, yes=yes)
 
 
 @app.command("clean", hidden=True)

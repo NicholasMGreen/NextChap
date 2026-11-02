@@ -7,6 +7,7 @@ pick when several books fit.  Paths are still built only from validated IDs.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from difflib import get_close_matches
 
@@ -15,7 +16,7 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from nextchap.config import Settings
-from nextchap.errors import BookNotFound, NextChapError
+from nextchap.errors import BookNotFound, InvalidBookId, NextChapError
 from nextchap.storage.paths import BookPaths, all_book_ids, book_paths, validate_book_id
 
 FUZZY_CUTOFF = 0.6
@@ -36,6 +37,26 @@ def _available_hint(ids: Sequence[str], *, limit: int = 12) -> str:
     if len(ids) > limit:
         shown += f", … ({len(ids) - limit} more)"
     return f"Available: {shown}. Run `nextchap status` to see them."
+
+
+def _normalize_query(raw: str) -> str:
+    """Case/space-insensitive lookup key; never a path and always a valid ID shape."""
+    if (
+        any(sep in raw for sep in ("/", "\\"))
+        or raw.startswith(".")
+        or re.match(r"^[A-Za-z]:", raw)
+    ):
+        raise InvalidBookId(f"Invalid book ID: {raw!r}")
+    try:
+        return validate_book_id(raw)
+    except InvalidBookId:
+        pass
+    normalized = re.sub(r"[^a-z0-9_-]+", "_", raw.casefold()).strip("_-")
+    normalized = re.sub(r"[_-]+", "_", normalized)
+    try:
+        return validate_book_id(normalized)
+    except InvalidBookId as exc:
+        raise InvalidBookId(f"Invalid book ID: {raw!r}") from exc
 
 
 def match_book_ids(available: Sequence[str], partial: str) -> list[str]:
@@ -72,13 +93,17 @@ def resolve_book(
     *,
     console: Console | None = None,
     interactive: bool | None = None,
+    require_exact: bool = False,
 ) -> BookPaths:
-    """Resolve ``partial`` to a book, picking one interactively when needed."""
+    """Resolve ``partial`` to a book, picking one interactively when needed.
+
+    ``require_exact`` disables prefix/fuzzy matching for destructive commands
+    while still allowing an omitted ID to go through the picker.
+    """
     err = console or Console(stderr=True)
     is_interactive = err.is_terminal if interactive is None else interactive
-    query = partial.strip() if partial is not None else ""
-    if query:
-        validate_book_id(query)
+    raw = partial.strip() if partial is not None else ""
+    query = _normalize_query(raw) if raw else ""
     available = available_books(settings)
     if not available:
         if query:
@@ -103,6 +128,12 @@ def resolve_book(
             )
         err.print(f"[dim]using book:[/] [bold]{chosen}[/]")
         return book_paths(settings.data_root, chosen)
+
+    if require_exact and query not in available:
+        raise BookNotFound(
+            f"Book {raw!r} not found (this command requires an exact ID).",
+            hint=_available_hint(available),
+        )
 
     matches = match_book_ids(available, query)
     if not matches:

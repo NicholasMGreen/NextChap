@@ -159,6 +159,11 @@ def test_status_fuzzy_and_fix(cli, novel_txt: Path) -> None:  # type: ignore[no-
     code, out, err = cli("status", "nov")
     assert code == 0 and "Total spend" in out and "Journal" in out and "novel" in out
 
+    code, out, _ = cli("status", "novel", "--json")
+    data = json.loads(out)
+    assert code == 0 and data["index"]["ok"] is True and data["index"]["chunks"] > 0
+    assert data["journal"] is None and "[yellow]" not in out
+
     code, _, err = cli("generate", "novl", "--dry-run")
     assert code == 0 and "using book" in err and "novel" in err
 
@@ -167,6 +172,65 @@ def test_status_fuzzy_and_fix(cli, novel_txt: Path) -> None:  # type: ignore[no-
 
     code, _, err = cli("fix", "novel", "--rebuild-index")
     assert code == 0 and "Indexed" in err
+
+
+def test_fix_guards_and_exact_delete(cli, novel_txt: Path) -> None:  # type: ignore[no-untyped-def]
+    assert cli("import", str(novel_txt))[0] == 0
+
+    code, _, err = cli("fix", "novel", "--rebuild-index", "--clean")
+    assert code == 1 and "one repair at a time" in err
+    code, _, err = cli("fix", "novel", "--clean", "--dry-run")
+    assert code == 1 and "--dry-run only applies" in err
+
+    code, _, err = cli("books", "delete", "novl", "--yes")
+    assert code == 1 and "exact ID" in err
+    code, out, _ = cli("status", "novel", "--json")
+    assert json.loads(out)["book_id"] == "novel"
+
+    code, _, err = cli("books", "delete", "novel", "--yes")
+    assert code == 0 and "Deleted" in err
+
+
+def test_fix_interactive_repairs(
+    cli, novel_txt: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    assert cli("import", str(novel_txt))[0] == 0
+    monkeypatch.setattr(AppContext, "interactive", property(lambda self: True))
+
+    monkeypatch.setattr(app_mod.Prompt, "ask", lambda *a, **k: "1")
+    code, _, err = cli("fix", "novel")
+    assert code == 0 and "Indexed" in err
+
+    monkeypatch.setattr(app_mod.Prompt, "ask", lambda *a, **k: "2")
+    code, _, err = cli("fix", "novel")
+    assert code == 0 and "Renumbered" in err
+
+    master = tmp_path / "data" / "novel_books" / "novel" / "master_book.md"
+    master.write_text(
+        master.read_text(encoding="utf-8") + "\nRead 10 chapters in advance on Patreon!\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(app_mod.Prompt, "ask", lambda *a, **k: "3")
+    code, _, err = cli("fix", "novel")
+    assert code == 0 and "Removed" in err
+
+
+def test_fix_interactive_rollback(
+    cli, novel_txt: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    assert cli("import", str(novel_txt))[0] == 0
+    from nextchap.config import Settings
+    from nextchap.pipeline.book import Book
+
+    book = Book.open(Settings(data_dir=tmp_path / "data"), "novel")
+    book.world.save(book.world.load().model_copy(update={"chapter_count": 5}))
+
+    monkeypatch.setattr(AppContext, "interactive", property(lambda self: True))
+    answers = iter(["4", "5"])
+    monkeypatch.setattr(app_mod.Prompt, "ask", lambda *a, **k: next(answers))
+    monkeypatch.setattr(app_mod.Confirm, "ask", lambda *a, **k: True)
+    code, _, err = cli("fix", "novel")
+    assert code == 0 and "restored to chapter 5" in err and "removed chapters 6-6" in err
 
 
 def test_status_lists_all_books(cli, novel_txt: Path) -> None:  # type: ignore[no-untyped-def]

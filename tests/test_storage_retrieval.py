@@ -96,6 +96,14 @@ def test_store_refuses_other_embedding(tmp_path: Path) -> None:
         VectorStore(tmp_path / "idx", HashEmbedder(dim=64), RetrievalConfig())
 
 
+def test_store_inspect_distinguishes_missing_and_unreadable(tmp_path: Path) -> None:
+    assert VectorStore.inspect(tmp_path / "missing") is None
+    broken = tmp_path / "broken"
+    broken.write_text("not a chroma directory", encoding="utf-8")
+    info = VectorStore.inspect(broken)
+    assert info is not None and info.unreadable and info.chunks == 0
+
+
 def test_estimates_scale(settings: object) -> None:
     from nextchap.models import ModelRegistry
     from nextchap.pipeline.estimate import estimate_generation, estimate_import, total

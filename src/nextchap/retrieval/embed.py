@@ -88,6 +88,16 @@ def _normalize(v: list[float]) -> list[float]:
     return [x / norm for x in v]
 
 
+def embedder_name(settings: Settings) -> str:
+    """The identifier recorded in Chroma metadata, without loading a model."""
+    r = settings.retrieval
+    if r.embed_backend == "hash":
+        return HashEmbedder().name
+    if r.embed_backend == "remote":
+        return f"remote:{r.remote_embed_model}"
+    return r.embed_model
+
+
 def make_embedder(settings: Settings, client: Any | None = None) -> Embedder:
     r = settings.retrieval
     if r.embed_backend == "hash":

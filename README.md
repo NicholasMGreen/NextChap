@@ -69,7 +69,8 @@ nextchap                         # interactive book → action menu
 nextchap import FILE [--book-id ID] [--dry-run] [--yes] [--force] [--max-cost N]
 nextchap generate [BOOK] [-n N] [--max-cost N] [--review] [--dry-run]
 nextchap status [BOOK] [--json]  # overview, world state, spend, index, journal
-nextchap fix [BOOK]              # diagnose + numbered repairs, or --rebuild-index
+nextchap fix [BOOK]              # diagnose + numbered repairs (index/state/clean/
+                                 #   rollback/delete), or --rebuild-index
                                  #   --rebuild-state / --clean for scripts
 nextchap export [BOOK] [-o PATH] [--template EPUB] [--check]
 nextchap models [--refresh]      # model per role, live price, availability
@@ -78,7 +79,9 @@ nextchap config show | path | set KEY VALUE [--project] | set-key
 ```
 
 Older names (`books`, `state`, `index`, `clean`, `export epub`) still work as
-hidden aliases with a one-line deprecation pointer.
+hidden aliases with a one-line deprecation pointer. Destructive deletion lives
+in the `fix` menu; the hidden `books delete` command requires an exact book ID
+so a typo cannot erase the wrong book.
 
 Shell completion (including book IDs): `nextchap --install-completion`. `doctor`
 reports whether completion is installed.

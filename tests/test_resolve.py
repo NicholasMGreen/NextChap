@@ -66,6 +66,28 @@ def test_exact_prefix_and_typo(settings: Settings) -> None:
     assert resolve.resolve_book(settings, "chaos_deri", console=console).book_id == "chaos_derry"
 
 
+def test_uppercase_and_spaces_are_normalized(settings: Settings) -> None:
+    console = Console()
+    assert (
+        resolve.resolve_book(settings, "DEADPOOL", console=console).book_id
+        == "deadpool_twilight_v2"
+    )
+    assert resolve.resolve_book(settings, "Lord Unknown", console=console).book_id == "lord_unknown"
+
+
+def test_require_exact_rejects_prefix_and_typo(settings: Settings) -> None:
+    with pytest.raises(BookNotFound, match="exact ID"):
+        resolve.resolve_book(
+            settings, "deadp", console=Console(), interactive=False, require_exact=True
+        )
+    assert (
+        resolve.resolve_book(
+            settings, "deadpool_twilight_v2", console=Console(), require_exact=True
+        ).book_id
+        == "deadpool_twilight_v2"
+    )
+
+
 def test_ambiguous_prefix_errors_non_interactively(settings: Settings) -> None:
     (books_dir(settings.data_root) / "dead_end").mkdir()
     with pytest.raises(AmbiguousBook, match="dead"):
