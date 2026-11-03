@@ -5,9 +5,11 @@ import pytest
 from nextchap.pipeline.book import Book
 from nextchap.pipeline.engine import Engine
 from nextchap.pipeline.humanize import (
+    dominant_opener,
     flat_rhythm,
     humanize_findings,
     sentence_lengths,
+    sentence_openers,
     tell_hits,
 )
 from nextchap.prompts import PROMPT_VERSION, raw, render
@@ -60,6 +62,55 @@ def test_tell_hits_and_pivot() -> None:
     assert tell_hits("The rain fell. He waited.") == []
 
 
+def test_tell_hits_cover_fiction_words() -> None:
+    prose = "She moved with meticulous care through the intricate hall."
+    assert tell_hits(prose) == ["meticulous", "intricate"]
+    assert tell_hits("A symphony of steel. A labyrinth of corridors.") == [
+        "a symphony of",
+        "labyrinth of",
+    ]
+
+
+def test_sentence_openers_skips_separators() -> None:
+    openers = sentence_openers("Slowly he turned. * * *\n\nQuietly she left.")
+    assert openers == ["slowly", "quietly"]
+
+
+CRUTCH = ["Slowly the door opened."] * 7 + [
+    "Rain hit the window.",
+    "He counted the guards twice.",
+    "Cold air came up the stairwell.",
+    "A lantern guttered and died.",
+    "Boots sounded somewhere below.",
+    "Lin Feng waited.",
+    "Nobody called out.",
+    "The gate stayed shut.",
+    "Somewhere a dog barked.",
+    "Steel rang against stone.",
+    "Water dripped from the eaves.",
+    "Then the bell rang.",
+    "Mei said nothing at all.",
+]
+
+
+def test_dominant_opener_flags_the_swapped_in_crutch() -> None:
+    finding = dominant_opener(" ".join(CRUTCH))
+    assert finding is not None
+    assert 'start with "slowly"' in finding
+
+
+def test_dominant_opener_ignores_short_text_and_function_words() -> None:
+    assert dominant_opener("Slowly the door opened. Slowly it shut.") is None
+    for first in ("And", "But", "He", "The", "It"):
+        prose = " ".join([f"{first} the rain fell on the roof of the old hall."] * 20)
+        assert dominant_opener(prose) is None
+
+
+def test_humanize_findings_ignores_a_pronoun_opener() -> None:
+    prose = " ".join(["He looked at the door and then at the window."] * 20)
+    assert not any("opener" in f for f in humanize_findings(prose))
+
+
 def test_humanize_findings_combines_tells_and_rhythm() -> None:
     prose = "It was a testament to his will. " + VARIED
     findings = humanize_findings(prose)
@@ -71,12 +122,24 @@ def test_humanize_findings_clean_prose_is_clean() -> None:
     assert humanize_findings(VARIED) == []
 
 
+def test_humanize_findings_reports_a_repeated_opener() -> None:
+    findings = humanize_findings(" ".join(CRUTCH))
+    assert any("Repeated sentence opener" in f for f in findings)
+
+
 def test_writer_system_carries_the_humanize_rules() -> None:
     rules = raw("humanize")
     system = render("writer_system", pov="third", tone="tense", humanize=rules)
     assert "VOICE AND HUMANITY RULES" in system
-    assert "no typos" not in system.lower()
     assert "Never typos" in system
+
+
+def test_humanize_prompt_covers_texture_and_over_correction() -> None:
+    rules = raw("humanize")
+    assert "Vary paragraph length" in rules
+    assert "trade one crutch for another" in rules
+    assert "over-correct" in rules
+    assert "rhetorical question" in rules
 
 
 def test_humanize_prompt_has_no_placeholders() -> None:

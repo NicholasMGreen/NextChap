@@ -1,7 +1,9 @@
 # Humanizing generated prose
 
-Trimmed from a general-purpose "humanize text" skill. Only what applies to writing the next
-chapter of a novel survived the cut; see *Removed on purpose* at the end for what went and why.
+Trimmed from a general-purpose "humanize text" skill, with a few ideas absorbed from
+[lguz/humanize-writing-skill](https://github.com/lguz/humanize-writing-skill) (MIT). Only what
+applies to writing the next chapter of a novel survived; see *Removed on purpose* at the end for
+what went and why.
 
 Two jobs: strip the phrasing that makes prose read as machine-written, and make the voice match
 the chapters already in `master_book.md`.
@@ -27,10 +29,12 @@ Extract, from a few recent chapters:
 1. **Sentence length pattern.** Variance, signature fragments, one recurring long-sentence shape.
 2. **Word choice level.** Plain ("thing", "stuff") or ornate ("the scent of iron and rain")?
    Contractions or not?
-3. **Paragraph and chapter openers.** Straight into a scene, or a line of context first?
-4. **Punctuation habits.** Em dashes, ellipses, parentheses, semicolons, dashes in dialogue.
-5. **Verbal tics.** Phrases the narration and each character reuse.
-6. **Transition style.** Explicit connectors ("Later that night,") or none at all?
+3. **Paragraph shape.** Long paragraphs that build, or one sentence per line? Does the book
+   ever close a paragraph on a beat?
+4. **Paragraph and chapter openers.** Straight into a scene, or a line of context first?
+5. **Punctuation habits.** Em dashes, ellipses, parentheses, semicolons, dashes in dialogue.
+6. **Verbal tics.** Phrases the narration and each character reuse.
+7. **Transition style.** Explicit connectors ("Later that night,") or none at all?
 
 When anything below conflicts with the sample, **the sample wins**. Never upgrade the vocabulary
 or the register of the book. An ornate book stays ornate; a terse one stays terse.
@@ -54,6 +58,10 @@ or the register of the book. An ornate book stays ornate; a terse one stays ters
 | Elegant variation (synonym cycling): "the protagonist… the main character… the central figure" | Pick one noun per referent; vary with a pronoun. |
 | Filler wrappers: "due to the fact that", "in the event that", "has the ability to", "with regard to" | "because", "if", "can", "about". |
 | "It is important to note", "in many cases", "generally speaking" | Cut. |
+| Rhetorical question answered in the next breath ("Why did it matter? Because—") | Say it once, directly. |
+| **Secondary convergence:** the banned phrase is gone and the same replacement lands everywhere, or every sentence now opens the same way | The fix for a cliché is never a different cliché. Vary the substitute and the opener. |
+| Every paragraph the same length, and every paragraph closed on a beat | Let paragraph length follow the scene's energy. Some paragraphs just stop. |
+| Prose visibly straining to look human (manufactured quirks, staged sloppiness) | Over-correction is its own tell. Slightly awkward beats deliberately awkward. |
 
 Dialogue is where the machine voice hides best: no character explains their own subtext, no
 speech is a tidy thesis, no two characters share one vocabulary.
@@ -68,6 +76,9 @@ Uniform sentence length is the loudest tell and it survives word swaps.
   collapses into a single comfortable band.
 - If every sentence is grammatically complete and every clause connected, the paragraph is too
   smooth. One thought per scene may go slightly unresolved.
+- Paragraphs vary too. The same length everywhere, each one closed with a beat, is the same
+  tell one level up. `dominant_opener()` in `pipeline/humanize.py` measures the convergence
+  case: one non-function word opening 30% or more of a chapter's non-function sentence openers.
 
 ## 4. Controlled irregularity
 

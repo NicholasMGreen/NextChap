@@ -1,17 +1,18 @@
-"""Deterministic checks for machine-sounding prose: stock phrasing and flat rhythm.
+"""Deterministic checks for machine-sounding prose.
 
 The rules themselves live in `prompts/humanize.md` (sent to the writer, and echoed to the
 critic) with the long rationale in `docs/humanize.md`. This module measures only what a model
-does not have to: banned stock phrases and sentence-length spread. The critic gets evidence
-instead of a hunch, and a chapter can be re-run because a count fired.
+does not have to: banned stock phrases, sentence-length spread, and a repeated sentence opener
+(the crutch that replaces the one you banned). The critic gets evidence instead of a hunch.
 """
 
 from __future__ import annotations
 
 import re
+from collections import Counter
 
-# Stock phrases that read as machine-written in fiction. Mirrors the list in
-# prompts/humanize.md and docs/humanize.md; keep the three in sync.
+# Stock phrases that read as machine-written in fiction. prompts/humanize.md names the
+# worst of them in the system message; this list is the broader set the checks enforce.
 TELLS: tuple[str, ...] = (
     "a testament to",
     "little did",
@@ -31,6 +32,14 @@ TELLS: tuple[str, ...] = (
     "vibrant",
     "tapestry",
     "delve",
+    "meticulous",
+    "intricate",
+    "a symphony of",
+    "labyrinth of",
+    "undoubtedly",
+    "embark",
+    "bolster",
+    "garner",
 )
 
 MIN_SENTENCES = 8
@@ -38,10 +47,43 @@ MIN_SPREAD = 10
 MID_BAND = (10, 20)
 MAX_MID_SHARE = 0.6
 
+MIN_OPENER_SENTENCES = 15
+MAX_OPENER_SHARE = 0.3
+# Function words carry no stylistic signature: a run of these is normal prose. "And" and
+# "But" are also what the humanize rules ask for, so they must never be a finding.
+OPENER_ALLOWED = frozenset(
+    {
+        "and",
+        "but",
+        "so",
+        "then",
+        "the",
+        "a",
+        "an",
+        "he",
+        "she",
+        "it",
+        "they",
+        "i",
+        "you",
+        "we",
+        "his",
+        "her",
+        "their",
+        "its",
+        "my",
+        "your",
+        "there",
+        "this",
+        "that",
+    }
+)
+
 _PIVOT = re.compile(r"\bnot\s+(?:just|only)\b", re.IGNORECASE)
 _SENTENCE = re.compile(r"[^.!?…]+[.!?…]*")
+_FIRST_WORD = re.compile(r"[A-Za-z']+")
 # A scene separator line ("* * *", "---") is not a sentence boundary worth trusting.
-_SEPARATOR = re.compile(r"^\s*(?:[*_~#-]{2,}\s*)+$", re.MULTILINE)
+_SEPARATOR = re.compile(r"^\s*[*_~#-](?:[\s*_~#-]*[*_~#-])+\s*$", re.MULTILINE)
 
 
 def sentence_lengths(prose: str) -> list[int]:
@@ -75,6 +117,27 @@ def flat_rhythm(prose: str) -> str | None:
     return None
 
 
+def sentence_openers(prose: str) -> list[str]:
+    """First word of every sentence, lowercased."""
+    openers: list[str] = []
+    for sentence in _SENTENCE.findall(_SEPARATOR.sub(" ", prose)):
+        match = _FIRST_WORD.search(sentence)
+        if match:
+            openers.append(match.group(0).lower())
+    return openers
+
+
+def dominant_opener(prose: str) -> str | None:
+    """A finding when one word keeps starting sentences: the swapped-in crutch."""
+    openers = [w for w in sentence_openers(prose) if w not in OPENER_ALLOWED]
+    if len(openers) < MIN_OPENER_SENTENCES:
+        return None
+    word, count = Counter(openers).most_common(1)[0]
+    if count / len(openers) < MAX_OPENER_SHARE:
+        return None
+    return f'Repeated sentence opener: {count} of {len(openers)} sentences start with "{word}".'
+
+
 def tell_hits(prose: str) -> list[str]:
     """Stock phrases present in the prose, in TELLS order."""
     low = prose.lower()
@@ -93,4 +156,7 @@ def humanize_findings(prose: str) -> list[str]:
     rhythm = flat_rhythm(prose)
     if rhythm:
         findings.append(rhythm)
+    opener = dominant_opener(prose)
+    if opener:
+        findings.append(opener)
     return findings
