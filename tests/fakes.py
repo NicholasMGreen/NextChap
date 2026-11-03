@@ -54,12 +54,14 @@ class FakeLLM:
     ) -> None:
         self.meter = meter or CostMeter()
         self.calls: list[tuple[str, str]] = []
+        self.prompts: list[tuple[str, str, str]] = []
         self.scene_words = scene_words
         self.critic_verdict = critic_verdict
         self.cost_per_call = cost_per_call
         self.before_call: Callable[[str, str], None] | None = None
 
-    def _record(self, role: str, label: str) -> None:
+    def _record(self, role: str, label: str, system: str = "", user: str = "") -> None:
+        self.prompts.append((role, system, user))
         if self.before_call:
             self.before_call(role, label)
         self.meter.check_budget()
@@ -89,7 +91,7 @@ class FakeLLM:
         on_delta: Any = None,
         max_tokens: int | None = None,
     ) -> Completion:
-        self._record(role, label)
+        self._record(role, label, system, user)
         if label.startswith(("write:", "extend:", "rewrite:")):
             out = prose(self.scene_words, label)
             if on_delta:
@@ -115,7 +117,7 @@ class FakeLLM:
         prefix: str = "",
         label: str = "",
     ) -> BaseModel:
-        self._record(role, label)
+        self._record(role, label, system, user)
         if schema is WorldStateExtraction:
             return WorldStateExtraction(
                 characters=[

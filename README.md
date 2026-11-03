@@ -9,6 +9,7 @@ Continue a web novel from an existing `.epub` or `.txt`. NextChap builds a long-
   - an editable story bible and style guide.
 - **Retrieval:** local Qwen3 embeddings with hybrid dense + BM25 search over scene-sized chunks, so exact names like "Azure Dragon Fist" are found.
 - **Safety and quality:** a crash-safe, resumable commit journal, a spend cap, and a continuity critic that can revise flagged scenes.
+- **Voice:** the writer is held to the book's own voice. Stock AI phrasing and flat sentence rhythm are stripped, and the book's own irregularities (fragments, sentences opening on And, interruptions in dialogue) are allowed. See [docs/humanize.md](docs/humanize.md).
 - **Output:** EPUB that keeps the original cover and metadata and adds a proper table of contents.
 
 Typical cost is **about $0.01 per generated chapter** and **about $0.25 to import a 500-chapter book**. Prices come live from OpenRouter, and `--dry-run` shows the estimate before you spend anything.
@@ -102,6 +103,7 @@ export_epub = true       # was --no-epub
 [generation]
 target_words = [1800, 2400]
 min_words = 1200
+humanize = true          # voice rules in the writer prompt (see docs/humanize.md)
 max_cost = 1.00          # default --max-cost
 scene_separator = "* * *" # "" joins scenes without a break
 
@@ -141,7 +143,7 @@ Any OpenRouter model ID works for any role. The client reads each model's suppor
 
 1. **Plan:** a structured scene plan with beats, thread IDs, and an ending hook.
 2. **Write:** scene by scene, streaming. The stable context (style, bible, world state, recent chapters) is prompt-cached across scenes. Each scene also gets hybrid-retrieved past scenes.
-3. **Check:** local checks for length, repetition and banned phrases, plus an independent critic pass. Scenes with major issues are rewritten once.
+3. **Check:** local checks for length, repetition, banned phrases and machine-sounding prose (stock phrasing, flat sentence rhythm), plus an independent critic pass. Scenes with major issues are rewritten once, under the same voice rules.
 4. **Analyze:** summary plus a validated world-state delta, applied to a copy and rejected if it would lose data.
 5. **Commit:** written in a fixed order: `master_book.md`, then world state, then index, then summaries, then `book.json`. Every write is atomic, and a file lock prevents two runs on one book.
 
@@ -155,6 +157,7 @@ Books live in `novel_books/` inside the project directory (same layout as 1.x). 
 novel_books/<book-id>/
   master_book.md            canonical text of every chapter (edit freely)
   style.md                  style guide sent with every writing request (edit freely)
+                            "avoid" lines are enforced as banned phrases
   master_bible.md           story bible (edit freely; refreshed every 5 chapters)
   world_state.json          characters, threads (t001…), rules, locations, factions, hook
   world_state_history/      snapshot after every chapter (used by state diff/rollback)
