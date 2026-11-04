@@ -6,7 +6,7 @@ from functools import cache
 from importlib import resources
 from string import Template
 
-PROMPT_VERSION = "2.0.0"
+PROMPT_VERSION = "2.1.0"
 
 
 @cache

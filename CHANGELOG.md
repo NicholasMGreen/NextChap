@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Humanized prose
+
+- The writer system prompt now carries voice rules (`prompts/humanize.md`): match the book's sentence lengths, word level and punctuation; vary rhythm hard; cut negation pivots, significance inflation, hedge stacks, aphorism closers and other rhetorical scaffolding; keep the book's own irregularities (fragments, And/But openers, comma splices at speed, dialogue interruptions) but never typos, homophones or drifted tense.
+- New `pipeline/humanize.py` adds deterministic checks for stock phrasing, flat sentence rhythm, and secondary convergence (one non-function word opening 30% or more of a chapter's non-function sentence openers — the crutch that replaces the one you banned). Findings join the automated checks the critic sees, so a machine-sounding scene can be flagged and rewritten under the same rules.
+- Paragraph texture and over-correction are covered by the rules rather than by a count: vary paragraph length, do not close every paragraph on a beat, and do not strain to look human. Pronouns, articles and And/But openers are ignored by the opener check, so a book's normal voice never trips it.
+- `generation.humanize` (default `true`) turns the rules off for books whose voice is deliberately synthetic.
+- `style_default.md` bans more overused phrases, which `banned_phrases()` enforces automatically, and asks for paragraph-length variance. Existing `style.md` files are untouched.
+- `PROMPT_VERSION` 2.0.0 to 2.1.0. `docs/humanize.md` records the rationale and what was deliberately left out.
+
 ## 2.0.0 — 2026-10-29
 
 A rewrite as an installable package with a single `nextchap` command. See `docs/MODERNIZATION_PLAN.md` for the rationale.

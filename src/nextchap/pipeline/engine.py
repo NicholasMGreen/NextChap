@@ -44,6 +44,7 @@ from nextchap.memory.world_state import (
 )
 from nextchap.pipeline.book import Book, BookMeta
 from nextchap.pipeline.critic import CriticReport, critique, local_checks
+from nextchap.pipeline.humanize import humanize_findings
 from nextchap.pipeline.journal import Journal, JournalEntry
 from nextchap.pipeline.plan import PlanDoc, parse_plan, render_plan
 from nextchap.pipeline.planner import plan_chapter
@@ -55,7 +56,7 @@ from nextchap.pipeline.writer import (
     word_count,
     write_scene,
 )
-from nextchap.prompts import render
+from nextchap.prompts import raw, render
 from nextchap.retrieval.context import ContextBudget, fit_items, fit_text
 from nextchap.retrieval.store import VectorStore
 from nextchap.storage.atomic import atomic_write_text
@@ -352,6 +353,7 @@ class Engine:
             "writer_system",
             pov=state.narrative_pov or "match the existing chapters",
             tone=state.story_tone or "match the existing chapters",
+            humanize=raw("humanize") if self.cfg.humanize else "",
         )
         target = self.cfg.target_words
         target_total = (target[0] + target[1]) // 2
@@ -520,6 +522,8 @@ class Engine:
             target=self.cfg.target_words,
             style_guide=self.book.style(),
         )
+        if self.cfg.humanize:
+            checks += humanize_findings(prose)
         report: CriticReport | None
         try:
             report = critique(

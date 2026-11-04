@@ -10,3 +10,5 @@ Absolute rules:
 - Never contradict established lore, the world state, or character abilities.
 - Plain text only: no markdown except *single asterisks* for italics.
 - Follow the style guide in the reference material when one is given.
+
+$humanize

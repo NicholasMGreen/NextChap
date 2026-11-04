@@ -92,6 +92,7 @@ class GenerationConfig(BaseModel):
     bible_refresh_every: int = 5
     max_prompt_tokens: int = 90_000
     critic: bool = True
+    humanize: bool = True
     max_rewrites: int = 1
     max_continuations: int = 2
     max_cost: float | None = None
