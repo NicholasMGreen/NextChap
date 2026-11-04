@@ -183,6 +183,7 @@ def _estimate_table(title: str, rows: list[EstimateRow]) -> Table:
     t = Table(title=title, title_justify="left", show_edge=False)
     for col, just in (
         ("Role", "left"),
+        ("Step", "left"),
         ("Model", "left"),
         ("Calls", "right"),
         ("Input tok", "right"),
@@ -194,6 +195,7 @@ def _estimate_table(title: str, rows: list[EstimateRow]) -> Table:
     for r in rows:
         t.add_row(
             r.role,
+            r.step,
             r.model,
             f"{r.calls:g}",
             f"{r.prompt_tokens:,}",
@@ -202,7 +204,7 @@ def _estimate_table(title: str, rows: list[EstimateRow]) -> Table:
             money(r.cost),
         )
     t.add_section()
-    t.add_row("[bold]total", "", "", "", "", "", f"[bold]{money(total(rows))}")
+    t.add_row("[bold]total", "", "", "", "", "", "", f"[bold]{money(total(rows))}")
     return t
 
 

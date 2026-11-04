@@ -26,6 +26,24 @@ class CallRecord:
     ts: float = field(default_factory=time.time)
 
 
+@dataclass
+class CallTotals:
+    """Aggregated usage for one role/model bucket."""
+
+    calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cached_tokens: int = 0
+    cost: float = 0.0
+
+    def add(self, rec: CallRecord) -> None:
+        self.calls += 1
+        self.prompt_tokens += rec.prompt_tokens
+        self.completion_tokens += rec.completion_tokens
+        self.cached_tokens += rec.cached_tokens
+        self.cost += rec.cost
+
+
 class CostMeter:
     def __init__(self, max_cost: float | None = None) -> None:
         self.max_cost = max_cost
@@ -66,6 +84,19 @@ class CostMeter:
         for r in self.records:
             out[r.role] += r.cost
         return dict(out)
+
+    def by_model(self) -> dict[str, CallTotals]:
+        out: dict[str, CallTotals] = {}
+        for r in self.records:
+            out.setdefault(r.model, CallTotals()).add(r)
+        return out
+
+    def by_role_model(self) -> dict[tuple[str, str], CallTotals]:
+        """Usage keyed by (role, model): what actually did the work in this run."""
+        out: dict[tuple[str, str], CallTotals] = {}
+        for r in self.records:
+            out.setdefault((r.role, r.model), CallTotals()).add(r)
+        return out
 
     def remaining(self) -> float | None:
         return None if self.max_cost is None else self.max_cost - self.total_cost
