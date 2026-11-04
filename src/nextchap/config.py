@@ -114,6 +114,11 @@ class RetrievalConfig(BaseModel):
     rerank_model: str = "Qwen/Qwen3-Reranker-0.6B"
 
 
+class UIConfig(BaseModel):
+    # Some terminals lack Nerd Fonts, so the icon is opt-out rather than auto-detected.
+    footer_icon: bool = True
+
+
 class CleanupConfig(BaseModel):
     extra_noise_patterns: list[str] = Field(default_factory=list)
 
@@ -145,6 +150,7 @@ class Settings(BaseSettings):
     defaults: DefaultsConfig = DefaultsConfig()
     generation: GenerationConfig = GenerationConfig()
     retrieval: RetrievalConfig = RetrievalConfig()
+    ui: UIConfig = UIConfig()
     cleanup: CleanupConfig = CleanupConfig()
     network: NetworkConfig = NetworkConfig()
 

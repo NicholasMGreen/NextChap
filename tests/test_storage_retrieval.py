@@ -116,3 +116,25 @@ def test_estimates_scale(settings: object) -> None:
     imp = total(estimate_import(settings, reg, [Chapter(i, "t", "w " * 2500) for i in range(500)]))  # type: ignore[arg-type]
     assert 0.05 < imp < 2.0
     assert json.dumps(one)
+
+
+def test_estimate_rows_are_labelled(settings: object) -> None:
+    from nextchap.models import ModelRegistry
+    from nextchap.pipeline.estimate import estimate_generation, estimate_import
+
+    reg = ModelRegistry.offline()
+    chapters = [Chapter(i, "t", "w " * 300) for i in range(1, 4)]
+    imported = estimate_import(settings, reg, chapters)  # type: ignore[arg-type]
+    assert [row.step for row in imported] == [
+        "chapter summaries",
+        "arc summaries",
+        "master bible",
+        "world state",
+    ]
+    generated = estimate_generation(settings, reg, 2, 8000, 25000)  # type: ignore[arg-type]
+    assert all(row.step for row in generated)
+    assert [row.step for row in generated][:3] == [
+        "chapter plans",
+        "chapter scenes",
+        "summary + world-state delta",
+    ]

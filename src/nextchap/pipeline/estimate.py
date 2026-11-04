@@ -21,6 +21,7 @@ class EstimateRow:
     completion_tokens: int
     cached_tokens: int
     cost: float
+    step: str = ""
 
 
 def _row(
@@ -31,10 +32,11 @@ def _row(
     prompt: int,
     completion: int,
     cached: int = 0,
+    step: str = "",
 ) -> EstimateRow:
     model = settings.models.roles()[role].model
     cost = registry.estimate_cost(model, int(prompt), int(completion), int(cached))
-    return EstimateRow(role, model, calls, int(prompt), int(completion), int(cached), cost)
+    return EstimateRow(role, model, calls, int(prompt), int(completion), int(cached), cost, step)
 
 
 def estimate_import(
@@ -44,7 +46,15 @@ def estimate_import(
     arcs = -(-n // settings.generation.arc_size)
     summary_in = sum(min(estimate_tokens(c.content), 12_000) + 250 for c in chapters)
     return [
-        _row(settings, registry, "analyst", n, summary_in, n * 350),
+        _row(
+            settings,
+            registry,
+            "analyst",
+            n,
+            summary_in,
+            n * 350,
+            step="chapter summaries",
+        ),
         _row(
             settings,
             registry,
@@ -52,9 +62,18 @@ def estimate_import(
             arcs,
             arcs * (settings.generation.arc_size * 350 + 250),
             arcs * 900,
+            step="arc summaries",
         ),
-        _row(settings, registry, "analyst", 1, min(n, 60) * 350 + 600, 2500),
-        _row(settings, registry, "analyst", 1, 8000, 2500),
+        _row(
+            settings,
+            registry,
+            "analyst",
+            1,
+            min(n, 60) * 350 + 600,
+            2500,
+            step="master bible",
+        ),
+        _row(settings, registry, "analyst", 1, 8000, 2500, step="world state"),
     ]
 
 
@@ -74,7 +93,13 @@ def estimate_generation(
     writer_cached = (scenes - 1) * writer_prefix_tokens if caches else 0
     rows = [
         _row(
-            settings, registry, "planner", count, count * (base_prefix_tokens + 3500), count * 2500
+            settings,
+            registry,
+            "planner",
+            count,
+            count * (base_prefix_tokens + 3500),
+            count * 2500,
+            step="chapter plans",
         ),
         _row(
             settings,
@@ -84,6 +109,7 @@ def estimate_generation(
             count * writer_in,
             count * prose_tokens,
             count * writer_cached,
+            step="chapter scenes",
         ),
         _row(
             settings,
@@ -92,6 +118,7 @@ def estimate_generation(
             count * 2,
             count * (2 * prose_tokens + 2500),
             count * 1150,
+            step="summary + world-state delta",
         ),
     ]
     if g.critic:
@@ -103,6 +130,7 @@ def estimate_generation(
                 count,
                 count * (base_prefix_tokens + prose_tokens + 2000),
                 count * 600,
+                step="critic pass",
             )
         )
     bible_calls = count / max(1, g.bible_refresh_every)
@@ -114,6 +142,7 @@ def estimate_generation(
             bible_calls,
             int(bible_calls * 8000),
             int(bible_calls * 2500),
+            step="bible refresh",
         )
     )
     return rows

@@ -126,6 +126,9 @@ embed_backend = "local"  # local | remote
 embed_model = "Qwen/Qwen3-Embedding-0.6B"
 rerank = false           # true needs: uv tool install ".[local-embed,rerank]"
 
+[ui]
+footer_icon = true      # Nerd Font gauge in the status footer; false = plain labels
+
 [cleanup]
 extra_noise_patterns = ["^translator'?s note"]
 ```
@@ -146,6 +149,12 @@ Any OpenRouter model ID works for any role. The client reads each model's suppor
 3. extracts a structured world state;
 4. writes a story bible;
 5. indexes scene chunks.
+
+Import bills the `analyst` model only. `writer`, `planner` and `critic` are
+generation-time roles and make no import calls, so the pre-flight estimate lists
+`analyst` rows only — each labelled with the step it covers (chapter summaries,
+arc summaries, master bible, world state). The estimate does not model fallback
+models or retry overhead, so treat it as an approximation.
 
 **Each new chapter.** Every step is journaled under `staging/`:
 
