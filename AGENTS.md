@@ -10,7 +10,7 @@ The model setup is budget-only. Defaults live in `src/nextchap/config.py` (`Mode
 
 | Role | Model | Reasoning |
 |---|---|---|
-| writer | `anthropic/claude-haiku-5.5` | `none` |
+| writer | `deepseek/deepseek-v4.1-flash-1017` | `none` |
 | critic | `anthropic/claude-haiku-5.5` | `none` |
 | planner | `deepseek/deepseek-v4.1-flash-1017` | `low` |
 | analyst | `deepseek/deepseek-v4.1-flash-1017` | `none` |

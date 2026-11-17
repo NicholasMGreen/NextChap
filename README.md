@@ -116,10 +116,10 @@ max_cost = 1.00          # default --max-cost
 scene_separator = "* * *" # "" joins scenes without a break
 
 [models.writer]
-model = "anthropic/claude-haiku-5.5"
+model = "deepseek/deepseek-v4.1-flash-1017"
 reasoning = "none"       # keep thinking off for prose
 max_tokens = 6000
-fallbacks = ["deepseek/deepseek-v4.1-flash-1017"]
+fallbacks = ["anthropic/claude-haiku-5.5"]
 
 [retrieval]
 embed_backend = "local"  # local | remote
@@ -193,7 +193,7 @@ logs/nextchap.log           full debug log (tracebacks land here)
 
 - **`doctor` says the API key failed:** check `OPENROUTER_API_KEY`. HTTP 402 means you're out of credits (top up at openrouter.ai).
 - **Empty answers or "spent on hidden reasoning":** lower the role's `reasoning` setting (`none` or `low`).
-- **The model refuses dark content:** point the writer role at another model, e.g. `nextchap config set models.writer.model deepseek/deepseek-v4.1-flash-1017`. A content-filter refusal is automatically retried once on the fallback model.
+- **The model refuses dark content:** point the writer role at another model, e.g. `nextchap config set models.writer.model anthropic/claude-haiku-5.5`. A content-filter refusal is automatically retried once on the fallback model.
 - **"Book is locked":** another `nextchap` process is working on that book.
 - **Wrong chapter splits:** look at the anomalies list in `import --dry-run`. Fix the source or `master_book.md`, then run `nextchap fix --rebuild-state`.
 

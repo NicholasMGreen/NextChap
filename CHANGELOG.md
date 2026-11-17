@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Models
+
+- The default writer model is now DeepSeek V4.1 Flash (thinking off), with Claude Haiku 5.5 as its fallback. Critic stays on Haiku. Override per project or per book in `[models.writer]`.
+
 ### Humanized prose
 
 - The writer system prompt now carries voice rules (`prompts/humanize.md`): match the book's sentence lengths, word level and punctuation; vary rhythm hard; cut negation pivots, significance inflation, hedge stacks, aphorism closers and other rhetorical scaffolding; keep the book's own irregularities (fragments, And/But openers, comma splices at speed, dialogue interruptions) but never typos, homophones or drifted tense.
