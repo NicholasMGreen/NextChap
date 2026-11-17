@@ -354,6 +354,161 @@ def test_query_embedding_mismatch_does_not_rebuild(cli, novel_txt: Path, tmp_pat
     assert Settings(data_dir=tmp_path / "data").retrieval.embed_backend == "hash"
 
 
+def test_config_keys_lists_schema(cli, monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[no-untyped-def]
+    code, out, _ = cli("config", "keys", "--json")
+    rows = json.loads(out)
+    assert code == 0
+    by_key = {r["key"]: r for r in rows}
+    model = by_key["models.writer.model"]
+    assert model["kind"] == "model" and model["help"]
+    assert by_key["api_key"]["secret"] is True and by_key["api_key"]["editable"] is False
+    monkeypatch.setenv("COLUMNS", "250")  # keep rich from wrapping the keys table
+    code, out, _ = cli("config", "keys")
+    assert code == 0 and "models.writer.model" in out and "api_key" in out
+
+
+def test_config_get_sources_and_unknown(
+    cli, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    from nextchap import config_file
+
+    monkeypatch.setattr(config_file, "user_config_path", lambda: tmp_path / "no-user-config.toml")
+    code, out, _ = cli("config", "get", "generation.min_words")
+    assert code == 0 and "generation.min_words = 900 (default, default 900)" in out
+
+    code, _, err = cli("config", "set", "generation.min_words", "1200", "--project")
+    assert code == 0, err
+    code, out, _ = cli("config", "get", "generation.min_words")
+    assert code == 0 and "generation.min_words = 1200 (project, default 900)" in out
+
+    code, out, _ = cli("config", "get", "generation.min_words", "--json")
+    record = json.loads(out)
+    assert record["source"] == "project" and record["value"] == 1200
+    assert record["default"] == 900 and record["changed"] is True and record["help"]
+
+    code, _, err = cli("config", "get", "nope.missing")
+    assert code == 1 and "unknown setting: nope.missing" in err and "config keys" in err
+
+
+def test_config_list_changed_and_all(cli, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[no-untyped-def]
+    from nextchap import config_file
+
+    monkeypatch.setattr(config_file, "user_config_path", lambda: tmp_path / "no-user-config.toml")
+    monkeypatch.delenv("NEXTCHAP_RETRIEVAL__EMBED_BACKEND", raising=False)
+
+    code, out, _ = cli("config", "list")
+    assert code == 0 and "Nothing changed from the defaults." in out and "--all" in out
+
+    code, _, err = cli("config", "set", "generation.min_words", "1200", "--project")
+    assert code == 0, err
+    code, out, _ = cli("config", "list")
+    assert code == 0 and "generation.min_words" in out and "project" in out
+    code, out, _ = cli("config", "list", "--all")
+    assert code == 0 and "generation.min_words" in out and "models.writer.model" in out
+    code, out, _ = cli("config", "list", "--json")
+    rows = json.loads(out)
+    assert len(rows) == 1 and rows[0]["key"] == "generation.min_words"
+    code, out, _ = cli("config", "list", "--all", "--json")
+    assert len(json.loads(out)) > 20
+
+    code, _, err = cli("config", "list", "--section", "bogus")
+    assert code == 1 and "unknown section" in err
+
+
+def test_config_set_atomic_with_backup_and_restore(
+    cli, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    from nextchap import config_file
+
+    monkeypatch.setattr(config_file, "user_config_path", lambda: tmp_path / "no-user-config.toml")
+
+    def boom(self: Path, text: str, encoding: str = "utf-8") -> int:
+        raise AssertionError("config set must write through storage.atomic, not Path.write_text")
+
+    monkeypatch.setattr(Path, "write_text", boom)
+    code, _, err = cli("config", "set", "generation.min_words", "1200", "--project")
+    assert code == 0, err
+    toml = tmp_path / "nextchap.toml"
+    assert not toml.with_name("nextchap.toml.bak").exists()  # first write has nothing to back up
+
+    monkeypatch.setattr(Path, "write_text", boom)  # re-arm in case a prior write replaced it
+    code, _, err = cli("config", "set", "generation.min_words", "1300", "--project")
+    assert code == 0, err
+    assert toml.with_name("nextchap.toml.bak").exists()
+    assert "min_words = 1200" in toml.with_name("nextchap.toml.bak").read_text()
+
+    code, _, err = cli("config", "unset", "generation.min_words", "--project", "--restore")
+    assert code == 0, err
+    assert "min_words = 1200" in toml.read_text()
+
+
+def test_config_unset_absent_key_is_clean(
+    cli, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    from nextchap import config_file
+
+    monkeypatch.setattr(config_file, "user_config_path", lambda: tmp_path / "no-user-config.toml")
+    code, out, _ = cli("config", "unset", "generation.min_words", "--project")
+    assert code == 0 and "not set" in out
+    code, _, err = cli("config", "unset", "generation.min_words", "--project", "--restore")
+    assert code == 1 and "No backup" in err
+
+
+def test_config_edit_validates_before_saving(
+    cli, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    import click
+
+    from nextchap import config_file
+    from nextchap.cli import commands_extra
+
+    monkeypatch.setattr(config_file, "user_config_path", lambda: tmp_path / "no-user-config.toml")
+    toml = tmp_path / "nextchap.toml"
+
+    monkeypatch.setattr(click, "edit", lambda *a, **k: "[defaults]\nchapters = 2\n")
+    code, _, err = cli("config", "edit", "--project")
+    assert code == 0, err
+    assert "chapters = 2" in toml.read_text()
+    code, out, _ = cli("config", "get", "defaults.chapters")
+    assert "defaults.chapters = 2 (project" in out
+
+    good = toml.read_text()
+    monkeypatch.setattr(click, "edit", lambda *a, **k: "[defaults]\nchapters = 0\n")
+    code, _, err = cli("config", "edit", "--project")
+    assert code == 1 and "Invalid value" in err
+    assert toml.read_text() == good  # the invalid edit left the file untouched
+
+    monkeypatch.setattr(click, "edit", lambda *a, **k: 'api_key = "sk-or-x"\n')
+    code, _, err = cli("config", "edit", "--project")
+    assert code == 1 and "Refusing to store the API key" in err
+    assert toml.read_text() == good
+
+    monkeypatch.setattr(commands_extra.click, "edit", lambda *a, **k: None)
+    code, _, err = cli("config", "edit", "--project")
+    assert code == 0 and "No changes" in err
+
+
+def test_config_bare_command_non_tty_prints_summary(cli) -> None:  # type: ignore[no-untyped-def]
+    code, out, err = cli("config")
+    assert code == 0 and "NextChap settings" in out
+    assert "Non-interactive" in err
+
+
+def test_doctor_settings_row_warns_on_env_overrides(cli, monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[no-untyped-def]
+    from nextchap.models import ModelRegistry
+
+    monkeypatch.setattr(AppContext, "registry", lambda self, refresh=False: ModelRegistry.offline())
+    _code, out, _ = cli("doctor", "--json")  # no API key under test, so doctor exits 1
+    checks = {c["check"]: c for c in json.loads(out)}
+    assert checks["settings"]["status"] == "warn"
+    assert "NEXTCHAP_RETRIEVAL__EMBED_BACKEND" in checks["settings"]["detail"]
+
+    monkeypatch.delenv("NEXTCHAP_RETRIEVAL__EMBED_BACKEND", raising=False)
+    _code, out, _ = cli("doctor", "--json")
+    checks = {c["check"]: c for c in json.loads(out)}
+    assert checks["settings"]["status"] == "ok"
+
+
 def test_query_action_in_menu(
     cli,
     novel_txt: Path,
@@ -364,10 +519,43 @@ def test_query_action_in_menu(
     from nextchap.cli import menu
 
     monkeypatch.setattr(AppContext, "interactive", property(lambda self: True))
-    answers = iter(["4", "src3", "7"])
+    answers = iter(["4", "src3", "8"])
     monkeypatch.setattr(menu.Prompt, "ask", lambda *a, **k: next(answers))
     code = app_mod.main([])
     out, err = capsys.readouterr()
     assert code == 0
     assert "query passages (no API cost)" in err
     assert "Ch 03" in out
+
+
+def test_menu_dispatches_to_settings(
+    cli, novel_txt: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:  # type: ignore[no-untyped-def]
+    assert cli("import", str(novel_txt))[0] == 0
+    from nextchap.cli import menu
+
+    monkeypatch.setattr(AppContext, "interactive", property(lambda self: True))
+    # menu.Prompt and settings_browser.Prompt are the same rich.prompt.Prompt class
+    answers = iter(["7", "q"])  # 7 = settings action, then quit the browser
+    monkeypatch.setattr(menu.Prompt, "ask", lambda *a, **k: next(answers))
+    code = app_mod.main([])
+    _, err = capsys.readouterr()
+    assert code == 0
+    assert "settings (models, defaults, generation…)" in err
+    assert "NextChap settings" in err  # the browser opened and quit cleanly
+
+
+def test_menu_without_books_offers_settings(
+    cli, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:  # type: ignore[no-untyped-def]
+    from nextchap.cli import menu
+
+    monkeypatch.setattr(AppContext, "interactive", property(lambda self: True))
+    # menu.Prompt and settings_browser.Prompt are the same rich.prompt.Prompt class
+    answers = iter(["1", "q"])  # 1 = settings (the only action offered), then quit
+    monkeypatch.setattr(menu.Prompt, "ask", lambda *a, **k: next(answers))
+    code = app_mod.main([])
+    _, err = capsys.readouterr()
+    assert code == 0
+    assert "No books yet" in err and "nextchap import" in err
+    assert "NextChap settings" in err  # choosing 1 opened the settings browser
