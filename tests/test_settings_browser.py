@@ -50,12 +50,14 @@ def _row(key: str) -> int:
     return [s.key for s in _VISIBLE].index(key) + 1
 
 
-def _ctx(tmp_path: Path, *, plain: bool = False) -> tuple[AppContext, Console, Console]:
+def _ctx(
+    tmp_path: Path, *, plain: bool = False, data_dir: Path | None = None
+) -> tuple[AppContext, Console, Console]:
     out = Console(file=StringIO(), width=200, record=True, legacy_windows=False)
     err = Console(
         file=StringIO(), width=200, force_terminal=True, record=True, legacy_windows=False
     )
-    ctx = AppContext(data_dir=tmp_path / "data", plain=plain, out=out, err=err)
+    ctx = AppContext(data_dir=data_dir or tmp_path / "data", plain=plain, out=out, err=err)
     return ctx, out, err
 
 
@@ -255,6 +257,20 @@ class TestNonInteractive:
         err_text = _text(err)
         assert "Non-interactive: use nextchap config list | get | set." in err_text
         assert "NextChap settings" not in err_text
+
+    def test_app_level_data_dir_is_not_a_change(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # --data-dir / NEXTCHAP_HOME move the data root without touching a config layer.
+        monkeypatch.delenv("NEXTCHAP_RETRIEVAL__EMBED_BACKEND", raising=False)
+        ctx, out, _ = _ctx(tmp_path, plain=True, data_dir=tmp_path / "elsewhere")
+        _patch_ask(monkeypatch, [])
+
+        run_settings_browser(ctx)
+
+        out_text = _text(out)
+        assert "0 changed from default" in out_text
+        assert "data_dir" not in out_text
 
 
 # --- model_ids --------------------------------------------------------------

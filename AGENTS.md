@@ -72,6 +72,13 @@ docs/MODERNIZATION_PLAN.md            design rationale
 
 `nextchap` (no args) opens the book/action menu. The visible verbs are
 `import`, `generate`, `status`, `fix`, `export`, `models`, `doctor`, `config`.
+`nextchap config` with no subcommand opens the settings browser
+(`cli/settings_browser.py`). Every browser action has a non-interactive
+equivalent (`get`, `list`, `keys`, `set`, `unset`, `edit`); the browser is only
+a shell over those operations. Settings metadata (type, allowed values, range,
+help) lives in `config_schema.py` and is derived from `Settings` — never
+hand-list keys. Config files are read and written only through `config_file.py`
+(validated, atomic, one-step `.bak`), never with `Path.write_text`.
 Book arguments are optional and resolved through `cli/resolve.py`
 (exact → prefix → fuzzy → picker; case/space-insensitive). `books`, `state`,
 `index`, `clean` and `export epub` remain hidden legacy aliases. Deletion is in

@@ -6,6 +6,14 @@
 
 - The default writer model is now DeepSeek V4.1 Flash (thinking off), with Claude Haiku 5.5 as its fallback. Critic stays on Haiku. Override per project or per book in `[models.writer]`.
 
+### Configuration
+
+- `nextchap config` with no arguments opens a settings browser: every setting grouped by section, with its current value and the layer that supplied it (`default`, `user`, `project`, `dotenv`, `env`). `/`-filter, pick by number, edit in place. Booleans are `y/n`, enums show their allowed values, ranges are checked before the write, and `models.*.model` is chosen from a numbered list of known model ids.
+- New non-interactive verbs, so scripts never need the browser: `config get`, `config list [--all|--section|--json]`, `config keys [--json]`, `config unset [--restore]`, `config edit`. Every picked key has a descriptor (type, default, choices, range, help) in `config_schema.py`, derived from `Settings` so a new field cannot ship undocumented.
+- Config writes are now validated against the whole `Settings` model *before* they replace the file, go through `storage/atomic.py` (previously `config set` used a plain `write_text`), and leave a one-step `<file>.bak` for `config unset --restore`. A value still shadowed by an environment variable is reported by name.
+- `config set` validates the key against the registry: an unknown dotted key is now refused with a pointer to `config keys`, instead of being written where nothing reads it. `config keys` prints the whole schema (type, default, allowed values, range, help); `config get` answers "why is this value not what I set" with the winning layer and the declared default.
+- Bare `nextchap config` never blocks: without a terminal it prints the changed settings and exits 0. The bare `nextchap` menu gained a `settings` action that needs no book, and `doctor` gained a `settings` row listing environment variables that override the config files.
+
 ### Humanized prose
 
 - The writer system prompt now carries voice rules (`prompts/humanize.md`): match the book's sentence lengths, word level and punctuation; vary rhythm hard; cut negation pivots, significance inflation, hedge stacks, aphorism closers and other rhetorical scaffolding; keep the book's own irregularities (fragments, And/But openers, comma splices at speed, dialogue interruptions) but never typos, homophones or drifted tense.

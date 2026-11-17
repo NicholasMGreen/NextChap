@@ -1,8 +1,9 @@
 # Plan: `nextchap config` as a real settings CLI
 
-Status: planned on `feat/config-cli` (draft). Owner decision recorded below.
-Scope: the `config` command, a new settings browser, and the config-file write
-path. Nothing in the generation pipeline, retrieval, or book storage changes.
+Status: implemented on `feat/config-cli` (2026-11-05). Owner decision recorded
+below; implementation notes and deviations at the end. Scope: the `config`
+command, a new settings browser, and the config-file write path. Nothing in the
+generation pipeline, retrieval, or book storage was touched.
 
 ## Goal
 
@@ -225,3 +226,42 @@ fix.
   `Settings(env_nested_delimiter="__")` behaviour for nested keys.
 - Rollback is cheap: the browser and `config_file.py` are additive; Phase 2 is
   the only phase that changes existing behaviour, and it is a single commit.
+
+## Implementation notes (what actually shipped)
+
+Built in parallel git worktrees, one phase per branch, merged into
+`feat/config-cli` in four steps. Final: 278 tests (was 226), ruff and
+mypy --strict clean.
+
+Modules, as planned: `config_schema.py` (63 editable settings + `api_key`),
+`config_file.py`, `cli/prompt_value.py`, `cli/settings_browser.py`. The `config`
+app in `cli/commands_extra.py` gained `get`, `list`, `keys`, `unset`, `edit`, a
+callback for the browser, and a `doctor` row; `cli/menu.py` gained the settings
+action.
+
+Deviations worth knowing:
+
+1. **Defaults come from `Settings.model_construct()`, not `Settings()`.** A live
+   `Settings()` reads the developer's own `config.toml` and environment, so the
+   registry would advertise personal values as "the default". Effective values
+   are read from a live `Settings()` at render time, which is what makes the
+   changed-from-default marker meaningful.
+2. **`SettingSpecProtocol` members are read-only properties.** As plain
+   attributes they were invariant, so a frozen `SettingSpec` (whose `kind` is a
+   `Literal`) could never satisfy the protocol. Caught at integration, not by
+   the unit tests.
+3. **`data_dir` is reachable but never counts as "changed".** `--data-dir` and
+   `NEXTCHAP_HOME` are app-level overrides, not config-layer values, so
+   `config list` and the browser's non-interactive summary exclude it (it still
+   appears in the browser's "Data location" group and in `config get`).
+   Consequence: `config get data_dir` can show a value that differs from the
+   default while `source` reads `default`.
+4. **`config set` now rejects unknown keys** (previously any dotted key was
+   written). This is the one deliberate behaviour change in the surface;
+   `config set defaults.chapters 0` and `config set api_key …` keep their old
+   refusals.
+5. **`tests/conftest.py` now patches both `user_config_path` bindings**
+   (`nextchap.config` and `nextchap.config_file`). Patching only the first let
+   the layer module reach the developer's real `config.toml` inside tests.
+6. `env_shadow` uses loose comparison (case and quoting only), documented in
+   its docstring; it is a warning, never a validation.

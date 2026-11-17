@@ -25,7 +25,7 @@ from nextchap.cli.context import AppContext
 from nextchap.cli.prompt_value import ask_value, render_value
 from nextchap.cli.ui import error_panel
 from nextchap.config import Settings
-from nextchap.config_schema import DESCRIPTORS, SECTION_TITLES, SettingSpec
+from nextchap.config_schema import DESCRIPTORS, SECTION_TITLES, SECTIONS, SettingSpec
 from nextchap.errors import NextChapError
 from nextchap.models import KNOWN_MODELS
 
@@ -157,6 +157,18 @@ def _rows(section: str | None, filter_text: str) -> list[SettingSpec]:
     return specs
 
 
+def _is_changed(spec: SettingSpec, settings: Settings) -> bool:
+    """True when the effective value differs from the declared default.
+
+    Settings outside ``SECTIONS`` (``data_dir``) are app-level overrides -- ``--data-dir``
+    or ``NEXTCHAP_HOME`` -- not config-layer changes, so they never count as changed.
+    ``nextchap config list`` applies the same rule.
+    """
+    if spec.section not in SECTIONS:
+        return False
+    return bool(_value_of(settings, spec.key) != spec.default)
+
+
 def _value_of(settings: Settings, key: str) -> Any:
     node: Any = settings
     for part in key.split("."):
@@ -207,7 +219,7 @@ def _render(
         key_cell = Text(spec.key)
         if spec.key == done_key:
             key_cell.append(" ✓", style="green")
-        elif value != spec.default:
+        elif _is_changed(spec, settings):
             key_cell.append(" *", style="yellow")
         table.add_row(str(number), key_cell, _value_cell(spec, value), _source_cell(spec.key))
     console.print(table)
@@ -242,7 +254,7 @@ def _print_where(app_ctx: AppContext, settings: Settings) -> None:
 def _print_summary(app_ctx: AppContext, settings: Settings, section: str | None) -> None:
     """Non-interactive view: only the settings that differ from their defaults."""
     rows = _rows(section, "")
-    changed = [s for s in rows if _value_of(settings, s.key) != s.default]
+    changed = [s for s in rows if _is_changed(s, settings)]
     app_ctx.out.print(f"[bold]NextChap settings[/] · {len(changed)} changed from default")
     table = Table(show_header=True, box=None, pad_edge=False)
     table.add_column("Key")

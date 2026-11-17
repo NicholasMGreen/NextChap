@@ -342,7 +342,8 @@ def doctor_cmd(ctx: typer.Context, as_json: JsonOpt = False) -> None:
         shown = ", ".join(shadowing[:3])
         if len(shadowing) > 3:
             shown += f" +{len(shadowing) - 3} more"
-        add("settings", "warn", f"{shown} override the config files")
+        verb = "override" if len(shadowing) > 1 else "overrides"
+        add("settings", "warn", f"{shown} {verb} the config files")
     else:
         add("settings", "ok", "no environment variables override the config files")
     completion = _completion_file()
