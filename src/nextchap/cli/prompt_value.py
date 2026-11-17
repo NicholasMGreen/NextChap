@@ -24,15 +24,34 @@ _MODEL_ERROR = "expected a model id like vendor/model-name"
 
 
 class SettingSpecProtocol(Protocol):
-    """Structural view of a setting descriptor (see ``config_schema.SettingSpec``)."""
+    """Structural, read-only view of a setting descriptor (``config_schema.SettingSpec``).
 
-    key: str
-    kind: str  # "str" | "int" | "float" | "bool" | "enum" | "list[float]" | "list[str]" | "model" | "model_list"
-    help: str
-    choices: tuple[str, ...]
-    minimum: float | None
-    maximum: float | None
-    optional: bool
+    Declared as properties so a frozen dataclass satisfies it: protocol members are
+    invariant, and ``SettingSpec.kind`` is a ``Literal``, which only widens to ``str``
+    for a read-only attribute.
+    """
+
+    @property
+    def key(self) -> str: ...
+
+    # "str" | "int" | "float" | "bool" | "enum" | "list[float]" | "list[str]" | "model" | "model_list"
+    @property
+    def kind(self) -> str: ...
+
+    @property
+    def help(self) -> str: ...
+
+    @property
+    def choices(self) -> tuple[str, ...]: ...
+
+    @property
+    def minimum(self) -> float | None: ...
+
+    @property
+    def maximum(self) -> float | None: ...
+
+    @property
+    def optional(self) -> bool: ...
 
 
 def render_value(kind: str, value: Any) -> str:
