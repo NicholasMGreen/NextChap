@@ -4,21 +4,25 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import sys
 import tomllib
 from pathlib import Path
 from typing import Annotated, Any
 
+import click
 import httpx
 import typer
-from pydantic import ValidationError
 from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
 
+from nextchap import config_file, config_schema
+from nextchap.cli.prompt_value import parse_value, render_value
+from nextchap.cli.settings_browser import run_settings_browser
 from nextchap.config import (
     KEYRING_SERVICE,
     PROJECT_CONFIG,
@@ -26,8 +30,10 @@ from nextchap.config import (
     resolve_api_key,
     user_config_path,
 )
+from nextchap.config_schema import SettingSpec
 from nextchap.errors import ConfigError
 from nextchap.memory.world_state import WorldState
+from nextchap.storage.atomic import atomic_write_text
 
 JsonOpt = Annotated[bool, typer.Option("--json", help="Machine-readable output on stdout.")]
 
@@ -35,8 +41,13 @@ EXAMPLES_MODELS = "Examples:\n  nextchap models\n  nextchap models --refresh"
 EXAMPLES_DOCTOR = "Examples:\n  nextchap doctor\n  nextchap doctor --json"
 EXAMPLES_CONFIG = (
     "Examples:\n"
-    "  nextchap config path\n"
+    "  nextchap config                          browse settings interactively\n"
+    "  nextchap config --section models         open the browser on one section\n"
+    "  nextchap config list --all\n"
+    "  nextchap config get generation.min_words\n"
     "  nextchap config set defaults.chapters 3\n"
+    "  nextchap config unset defaults.chapters --restore\n"
+    "  nextchap config keys --json\n"
     "  nextchap config set-key"
 )
 
@@ -320,6 +331,21 @@ def doctor_cmd(ctx: typer.Context, as_json: JsonOpt = False) -> None:
         "ok" if shutil.which("epubcheck") else "info",
         "available" if shutil.which("epubcheck") else "optional; enables `export --check`",
     )
+
+    shadowing = [
+        name
+        for sp in config_schema.DESCRIPTORS
+        if sp.key != "api_key"  # reported by the API key row; never stored in a config file
+        and (name := config_file.env_var_name(sp.key)) in os.environ
+    ]
+    if shadowing:
+        shown = ", ".join(shadowing[:3])
+        if len(shadowing) > 3:
+            shown += f" +{len(shadowing) - 3} more"
+        verb = "override" if len(shadowing) > 1 else "overrides"
+        add("settings", "warn", f"{shown} {verb} the config files")
+    else:
+        add("settings", "ok", "no environment variables override the config files")
     completion = _completion_file()
     add(
         "Shell completion",
@@ -346,9 +372,28 @@ def doctor_cmd(ctx: typer.Context, as_json: JsonOpt = False) -> None:
         raise typer.Exit(1)
 
 
-config_app = typer.Typer(
-    help="Show and change settings.", no_args_is_help=True, epilog=EXAMPLES_CONFIG
-)
+config_app = typer.Typer(help="Show, browse and change settings.", epilog=EXAMPLES_CONFIG)
+
+
+@config_app.callback(invoke_without_command=True)
+def config_main(
+    ctx: typer.Context,
+    section: Annotated[
+        str | None,
+        typer.Option("--section", help="Open the browser on one section (models, defaults, …)."),
+    ] = None,
+    project: Annotated[
+        bool | None,
+        typer.Option(
+            "--project",
+            help="Pin writes to ./nextchap.toml; without it the browser asks once.",
+        ),
+    ] = None,
+) -> None:
+    """Browse and edit every setting interactively (non-interactive: print changed ones)."""
+    if ctx.invoked_subcommand is not None:
+        return
+    run_settings_browser(_app_ctx(ctx), section=section, project=project)
 
 
 @config_app.command("show", epilog="Example:\n  nextchap config show --json")
@@ -386,47 +431,294 @@ def _toml_safe(value: Any) -> Any:
     return value
 
 
-def _parse_value(raw: str) -> Any:
+def _spec_or_error(key: str) -> SettingSpec:
+    """The descriptor for ``key``, or a :class:`ConfigError` with a discovery hint."""
     try:
-        return json.loads(raw)
-    except ValueError:
-        return raw
+        return config_schema.spec(key)
+    except KeyError:
+        raise ConfigError(
+            f"unknown setting: {key}",
+            hint="Run `nextchap config keys` to list every setting.",
+        ) from None
+
+
+def _setting_value(settings: Settings, key: str) -> Any:
+    node: Any = settings
+    for part in key.split("."):
+        node = getattr(node, part)
+    return node
+
+
+def _jsonable(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    return str(value)
+
+
+def _record(sp: SettingSpec, settings: Settings) -> dict[str, Any]:
+    """The ``get``/``list`` record for one setting; secrets never carry a value."""
+    value = _setting_value(settings, sp.key)
+    return {
+        "key": sp.key,
+        "kind": sp.kind,
+        "value": None if sp.secret else _jsonable(value),
+        "default": _jsonable(sp.default),
+        "source": config_file.source_of(sp.key),
+        "help": sp.help,
+        "section": sp.section,
+        "changed": value != sp.default,
+    }
+
+
+def _value_text(sp: SettingSpec, value: Any) -> str:
+    if sp.secret:
+        return "••••"
+    return render_value(sp.kind, value) or "(unset)"
+
+
+@config_app.command("get", epilog="Example:\n  nextchap config get generation.min_words")
+def config_get(
+    ctx: typer.Context,
+    key: Annotated[str, typer.Argument(help="Dotted key, e.g. generation.min_words")],
+    as_json: JsonOpt = False,
+) -> None:
+    """Show one setting: effective value, declared default, and which layer won."""
+    app_ctx = _app_ctx(ctx)
+    sp = _spec_or_error(key)
+    record = _record(sp, app_ctx.settings)
+    if as_json:
+        app_ctx.out.print_json(json.dumps(record))
+        return
+    app_ctx.out.print(
+        f"{sp.key} = {_value_text(sp, _setting_value(app_ctx.settings, key))}"
+        f" ({record['source']}, default {_value_text(sp, sp.default)})"
+    )
+    app_ctx.out.print(f"[dim]{sp.help}[/]")
+
+
+@config_app.command(
+    "list",
+    epilog="Examples:\n  nextchap config list --all\n  nextchap config list --section models --json",
+)
+def config_list(
+    ctx: typer.Context,
+    all_settings: Annotated[
+        bool, typer.Option("--all", help="List every editable setting, not just changed ones.")
+    ] = False,
+    section: Annotated[str | None, typer.Option("--section", help="Only this section.")] = None,
+    as_json: JsonOpt = False,
+) -> None:
+    """List settings that differ from their defaults (``--all``: every editable one)."""
+    app_ctx = _app_ctx(ctx)
+    if section is not None and section not in config_schema.SECTION_TITLES:
+        raise ConfigError(
+            f"unknown section: {section}",
+            hint="Sections: " + ", ".join(config_schema.SECTION_TITLES),
+        )
+    # data_dir is provided per invocation (--data-dir / NEXTCHAP_HOME), not edited in a
+    # layer file; its effective value is still visible via `config get data_dir`.
+    specs = [s for s in config_schema.DESCRIPTORS if s.editable and s.key != "data_dir"]
+    if section is not None:
+        specs = [s for s in specs if s.section == section]
+    if not all_settings:
+        specs = [s for s in specs if _setting_value(app_ctx.settings, s.key) != s.default]
+    records = [_record(s, app_ctx.settings) for s in specs]
+    if as_json:
+        app_ctx.out.print_json(json.dumps(records))
+        return
+    if not records:
+        app_ctx.out.print("Nothing changed from the defaults.")
+        app_ctx.out.print("[dim]Hint: nextchap config list --all shows every setting.[/]")
+        return
+    table = Table(show_edge=False, title="Changed settings" if not all_settings else None)
+    table.add_column("Key")
+    table.add_column("Value")
+    table.add_column("Source")
+    if all_settings:
+        table.add_column("Default", style="dim")
+    for sp, record in zip(specs, records, strict=False):
+        row = [sp.key, _value_text(sp, _setting_value(app_ctx.settings, sp.key)), record["source"]]
+        if all_settings:
+            row.append(_value_text(sp, sp.default))
+        table.add_row(*row)
+    app_ctx.out.print(table)
+
+
+@config_app.command(
+    "keys", epilog="Examples:\n  nextchap config keys\n  nextchap config keys --json"
+)
+def config_keys(
+    ctx: typer.Context,
+    section: Annotated[str | None, typer.Option("--section", help="Only this section.")] = None,
+    as_json: JsonOpt = False,
+) -> None:
+    """Dump the setting registry: type, default, choices and help for every key."""
+    app_ctx = _app_ctx(ctx)
+    if section is not None and section not in config_schema.SECTION_TITLES:
+        raise ConfigError(
+            f"unknown section: {section}",
+            hint="Sections: " + ", ".join(config_schema.SECTION_TITLES),
+        )
+    specs = [s for s in config_schema.DESCRIPTORS if section is None or s.section == section]
+    if as_json:
+        rows = [
+            {
+                "key": s.key,
+                "kind": s.kind,
+                "default": _jsonable(s.default),
+                "choices": list(s.choices),
+                "minimum": s.minimum,
+                "maximum": s.maximum,
+                "optional": s.optional,
+                "editable": s.editable,
+                "secret": s.secret,
+                "section": s.section,
+                "help": s.help,
+            }
+            for s in specs
+        ]
+        app_ctx.out.print_json(json.dumps(rows))
+        return
+
+    def type_cell(s: SettingSpec) -> str:
+        parts: list[str] = [s.kind]
+        if s.choices:
+            parts.append("one of: " + "|".join(s.choices))
+        if s.minimum is not None or s.maximum is not None:
+            lo = "" if s.minimum is None else f"{_format_number(s.minimum)}≤"
+            hi = "" if s.maximum is None else f"≤{_format_number(s.maximum)}"
+            parts.append(f"({lo}x{hi})")
+        if s.optional:
+            parts.append("optional")
+        if not s.editable:
+            parts.append("read-only")
+        return " ".join(parts)
+
+    table = Table(show_edge=False)
+    table.add_column("Key")
+    table.add_column("Type")
+    table.add_column("Default")
+    table.add_column("Help")
+    for s in specs:
+        default = "••••" if s.secret else render_value(s.kind, s.default) or "(unset)"
+        table.add_row(s.key, type_cell(s), default, s.help)
+    app_ctx.out.print(table)
+
+
+def _format_number(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else str(value)
 
 
 @config_app.command("set", epilog="Example:\n  nextchap config set defaults.chapters 3 --project")
 def config_set(
     ctx: typer.Context,
     key: Annotated[str, typer.Argument(help="Dotted key, e.g. models.writer.model")],
-    value: Annotated[str, typer.Argument(help="Value (JSON for numbers/lists/booleans)")],
+    value: Annotated[str, typer.Argument(help="Value (see the type in `nextchap config keys`)")],
     project: Annotated[
         bool, typer.Option("--project", help="Write ./nextchap.toml instead of the user config.")
     ] = False,
 ) -> None:
     """Set a value in the user (or project) config file."""
-    import tomli_w
-
     app_ctx = _app_ctx(ctx)
-    if key.split(".")[0] == "api_key":
+    sp = _spec_or_error(key)
+    try:
+        parsed = parse_value(sp, value)
+    except ValueError as exc:
+        raise ConfigError(
+            f"Invalid value for {key}: {exc}",
+            hint=f"Check the type and allowed values for `{key}`: run `nextchap config keys`.",
+        ) from exc
+    path = config_file.layer_path(project)
+    data = config_file.load_layer(path)
+    merged = config_file.merge_value(data, key, parsed)  # refuses api_key
+    config_file.validate_layer(merged, key)
+    backup = config_file.write_layer(path, merged)
+    app_ctx.err.print(f"[green]✓[/] {key} = {parsed!r} in {path}")
+    if backup is not None:
+        app_ctx.err.print(
+            f"[dim]backup: {backup} · `nextchap config unset {key} --restore` undoes it[/]"
+        )
+    shadow = config_file.env_shadow(key, parsed)
+    if shadow is not None:
+        app_ctx.err.print(f"[yellow]![/] written, but {shadow} still wins")
+
+
+@config_app.command(
+    "unset",
+    epilog=(
+        "Examples:\n"
+        "  nextchap config unset defaults.chapters\n"
+        "  nextchap config unset defaults.chapters --restore"
+    ),
+)
+def config_unset(
+    ctx: typer.Context,
+    key: Annotated[str, typer.Argument(help="Dotted key, e.g. models.writer.model")],
+    project: Annotated[
+        bool, typer.Option("--project", help="Edit ./nextchap.toml instead of the user config.")
+    ] = False,
+    restore: Annotated[
+        bool,
+        typer.Option("--restore", help="Restore the .bak from the last write to this layer."),
+    ] = False,
+) -> None:
+    """Remove a key from the user (or project) config file."""
+    app_ctx = _app_ctx(ctx)
+    path = config_file.layer_path(project)
+    if restore:
+        if not config_file.restore_layer(path):
+            raise ConfigError(
+                f"No backup at {config_file.backup_path(path)}.",
+                hint="--restore only undoes the last `config set`/`unset` write in this layer.",
+            )
+        app_ctx.err.print(f"[green]✓[/] Restored {path} from {config_file.backup_path(path)}.")
+        return
+    data = config_file.load_layer(path)
+    new_data, found = config_file.drop_value(data, key)
+    if not found:
+        app_ctx.out.print(f"{key} is not set in {path}")
+        return
+    config_file.validate_layer(new_data, key)
+    backup = config_file.write_layer(path, new_data)
+    app_ctx.err.print(f"[green]✓[/] Removed {key} from {path}.")
+    if backup is not None:
+        app_ctx.err.print(
+            f"[dim]backup: {backup} · `nextchap config unset {key} --restore` undoes it[/]"
+        )
+
+
+@config_app.command("edit", epilog="Example:\n  nextchap config edit --project")
+def config_edit(
+    ctx: typer.Context,
+    project: Annotated[
+        bool, typer.Option("--project", help="Edit ./nextchap.toml instead of the user config.")
+    ] = False,
+) -> None:
+    """Open the config file in $EDITOR; the edited TOML is validated before saving."""
+    app_ctx = _app_ctx(ctx)
+    path = config_file.layer_path(project)
+    original = path.read_text(encoding="utf-8") if path.exists() else ""
+    edited = click.edit(text=original, extension=".toml")
+    if edited is None or edited == original:
+        app_ctx.err.print("[dim]No changes.[/]")
+        return
+    try:
+        data = tomllib.loads(edited)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(
+            f"{path} would not be valid TOML: {exc}",
+            hint="Nothing was written; fix the edit and run `nextchap config edit` again.",
+        ) from exc
+    if "api_key" in data:
         raise ConfigError(
             "Refusing to store the API key in a config file.",
             hint="Use `nextchap config set-key` or the OPENROUTER_API_KEY env var.",
         )
-    path = (Path.cwd() / PROJECT_CONFIG) if project else user_config_path()
-    data: dict[str, Any] = tomllib.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    node = data
-    parts = key.split(".")
-    for part in parts[:-1]:
-        node = node.setdefault(part, {})
-        if not isinstance(node, dict):
-            raise ConfigError(f"{key} conflicts with an existing non-table value.")
-    node[parts[-1]] = _parse_value(value)
-    try:
-        Settings(**data)
-    except ValidationError as exc:
-        raise ConfigError(f"Invalid value for {key}: {exc.errors()[0]['msg']}") from exc
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(tomli_w.dumps(data), encoding="utf-8")
-    app_ctx.err.print(f"[green]✓[/] {key} = {node[parts[-1]]!r} in {path}")
+    config_file.validate_layer(data, str(path))
+    atomic_write_text(path, edited)
+    app_ctx.err.print(f"[green]✓[/] Saved {path}.")
 
 
 @config_app.command("set-key", epilog="Example:\n  nextchap config set-key")

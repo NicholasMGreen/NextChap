@@ -8,7 +8,7 @@ import httpx
 import pytest
 from pydantic import BaseModel
 
-from nextchap.config import NetworkConfig, Settings
+from nextchap.config import DEEPSEEK_FLASH, HAIKU, NetworkConfig, Settings
 from nextchap.errors import BudgetExceeded, ConfigError, FatalLLMError, LLMError
 from nextchap.llm.client import EmptyCompletion, OpenRouterClient
 from nextchap.llm.cost import CostMeter
@@ -56,6 +56,7 @@ def make(
     *,
     meter: CostMeter | None = None,
     registry: ModelRegistry | None = None,
+    settings: Settings | None = None,
 ) -> tuple[OpenRouterClient, list[httpx.Request], list[float]]:
     seen: list[httpx.Request] = []
     sleeps: list[float] = []
@@ -64,7 +65,7 @@ def make(
         seen.append(req)
         return handler(req)
 
-    s = Settings(network=NetworkConfig(max_attempts=3))
+    s = settings or Settings(network=NetworkConfig(max_attempts=3))
     client = OpenRouterClient(
         s,
         "sk-or-test",
@@ -78,6 +79,13 @@ def make(
 
 def body(req: httpx.Request) -> dict[str, Any]:
     return json.loads(req.content)
+
+
+def haiku_writer() -> Settings:
+    """Settings whose writer role is Haiku, so client-level tests don't track defaults."""
+    s = Settings(network=NetworkConfig(max_attempts=3))
+    writer = s.models.writer.model_copy(update={"model": HAIKU, "fallbacks": [DEEPSEEK_FLASH]})
+    return s.model_copy(update={"models": s.models.model_copy(update={"writer": writer})})
 
 
 def test_requires_api_key() -> None:
@@ -107,7 +115,7 @@ def test_stream_text_with_usage_and_preview() -> None:
         )
 
     meter = CostMeter()
-    client, seen, _ = make(handler, meter=meter)
+    client, seen, _ = make(handler, meter=meter, settings=haiku_writer())
     comp = client.text("writer", "sys", "user", prefix="BIBLE", label="t", on_delta=previews.append)
     assert comp.text == "Hello world"
     assert previews[-1] == "Hello world"
@@ -133,7 +141,9 @@ def test_unsupported_params_are_not_sent() -> None:
         1.0,
     )
     client, seen, _ = make(
-        lambda r: httpx.Response(200, content=sse(delta("x", "stop"))), registry=reg
+        lambda r: httpx.Response(200, content=sse(delta("x", "stop"))),
+        registry=reg,
+        settings=haiku_writer(),
     )
     client.text("writer", "s", "u")
     b = body(seen[0])
@@ -227,7 +237,7 @@ def test_content_filter_falls_back_to_other_model() -> None:
             httpx.Response(200, content=sse(delta("dark prose", "stop"))),
         ]
     )
-    client, seen, _ = make(lambda r: next(responses))
+    client, seen, _ = make(lambda r: next(responses), settings=haiku_writer())
     assert client.text("writer", "s", "u").text == "dark prose"
     assert body(seen[1])["model"] == "deepseek/deepseek-v4.1-flash-1017"
 

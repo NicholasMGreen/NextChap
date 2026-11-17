@@ -34,12 +34,12 @@ class RoleModel(BaseModel):
 
 class ModelsConfig(BaseModel):
     writer: RoleModel = RoleModel(
-        model=HAIKU,
+        model=DEEPSEEK_FLASH,
         reasoning="none",
         temperature=0.9,
         top_p=0.95,
         max_tokens=6000,
-        fallbacks=[DEEPSEEK_FLASH],
+        fallbacks=[HAIKU],
     )
     planner: RoleModel = RoleModel(
         model=DEEPSEEK_FLASH,

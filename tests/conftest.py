@@ -6,6 +6,7 @@ import pytest
 from ebooklib import epub
 
 from nextchap import config as config_mod
+from nextchap import config_file as config_file_mod
 from nextchap.config import RetrievalConfig, Settings
 from nextchap.ingest.text import parse_text
 from nextchap.llm.cost import CostMeter
@@ -20,7 +21,11 @@ from tests.fakes import FakeLLM, prose
 def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep tests away from the real user config, env keys and data dirs."""
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(config_mod, "user_config_path", lambda: tmp_path / "no-user-config.toml")
+    user_config = lambda: tmp_path / "no-user-config.toml"  # noqa: E731
+    # Both bindings: config_file imports the name, so patching config alone would let
+    # real config-layer reads and writes reach the developer's own config.toml.
+    monkeypatch.setattr(config_mod, "user_config_path", user_config)
+    monkeypatch.setattr(config_file_mod, "user_config_path", user_config)
     for var in ("OPENROUTER_API_KEY", "NEXTCHAP_API_KEY"):
         monkeypatch.delenv(var, raising=False)
 

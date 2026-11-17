@@ -49,6 +49,23 @@ def _action_panel(chosen: str, actions: list[str]) -> Panel:
     return Panel(action_table, title=chosen, border_style="cyan", expand=False)
 
 
+SETTINGS_ACTION = "settings (models, defaults, generation…)"
+
+
+def _pick_action(app_ctx: AppContext, title: str, actions: list[str]) -> int:
+    """Numbered action picker; returns the 1-based choice (never blocks non-TTY)."""
+    while True:
+        app_ctx.err.print(_action_panel(title, actions))
+        answer = Prompt.ask(
+            "Action",
+            choices=[str(i) for i in range(1, len(actions) + 1)],
+            default="1",
+            console=app_ctx.err,
+            show_choices=False,
+        )
+        return int(answer)
+
+
 def run_menu(app_ctx: AppContext) -> list[str] | None:
     """Show the menu and return an argv tail for the chosen command, or None."""
     ids = available_books(app_ctx.settings)
@@ -66,7 +83,10 @@ def run_menu(app_ctx: AppContext) -> list[str] | None:
                 expand=False,
             )
         )
-        return None
+        if not app_ctx.interactive:
+            return None
+        choice = _pick_action(app_ctx, "NextChap", [SETTINGS_ACTION, "quit"])
+        return ["config"] if choice == 1 else None
     rows = overview_rows(app_ctx)
     app_ctx.err.print(_book_panel(rows, len(ids)))
 
@@ -90,18 +110,11 @@ def run_menu(app_ctx: AppContext) -> list[str] | None:
         "query passages (no API cost)",
         "export epub",
         "switch book",
+        SETTINGS_ACTION,
         "quit",
     ]
     while True:
-        app_ctx.err.print(_action_panel(chosen, actions))
-        answer = Prompt.ask(
-            "Action",
-            choices=[str(i) for i in range(1, len(actions) + 1)],
-            default="1",
-            console=app_ctx.err,
-            show_choices=False,
-        )
-        choice = int(answer)
+        choice = _pick_action(app_ctx, chosen, actions)
         if choice == 1:
             default_n = str(app_ctx.settings.defaults.chapters)
             count = Prompt.ask("How many chapters?", default=default_n, console=app_ctx.err)
@@ -131,4 +144,6 @@ def run_menu(app_ctx: AppContext) -> list[str] | None:
             app_ctx.err.print(_book_panel(rows, len(ids)))
             chosen = choose_book()
             continue
+        if choice == 7:
+            return ["config"]
         return None

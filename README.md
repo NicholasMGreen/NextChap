@@ -84,7 +84,12 @@ nextchap fix [BOOK]              # diagnose + numbered repairs (index/state/clea
 nextchap export [BOOK] [-o PATH] [--template EPUB] [--check]
 nextchap models [--refresh]      # model per role, live price, availability
 nextchap doctor
-nextchap config show | path | set KEY VALUE [--project] | set-key
+nextchap config                  # settings browser: filter, pick a setting, edit it
+nextchap config list [--all] [--section models] [--json]
+nextchap config get KEY [--json] # value, and which layer supplied it
+nextchap config keys [--json]    # every setting: type, default, allowed values, help
+nextchap config set KEY VALUE [--project] | unset KEY [--restore]
+nextchap config show | path | edit | set-key
 ```
 
 Older names (`books`, `state`, `index`, `clean`, `export epub`) still work as
@@ -97,7 +102,55 @@ reports whether completion is installed.
 
 ## Configuration
 
-Settings are layered, highest priority first: CLI flags, `NEXTCHAP_*` environment variables (nested with `__`, e.g. `NEXTCHAP_GENERATION__MIN_WORDS=1200`), `.env`, `./nextchap.toml`, then the user config (`nextchap config path`). Example `nextchap.toml`:
+Settings are layered, highest priority first: CLI flags, `NEXTCHAP_*` environment variables (nested with `__`, e.g. `NEXTCHAP_GENERATION__MIN_WORDS=1200`), `.env`, `./nextchap.toml`, then the user config (`nextchap config path`).
+
+`nextchap config` with no arguments opens the settings browser:
+
+```
+NextChap settings · 64 keys · ~/Library/Application Support/nextchap/config.toml
+ #  Key                              Value              Source
+ ── Models per role
+ 1  models.writer.model               deepseek/deepseek…  default
+ 2  models.writer.temperature         0.9                 default
+ ── Defaults
+ 3  defaults.chapters                 3                   user
+
+1-64 · /filter · [w]here nextchap.toml is · ? help · [q]uit
+```
+
+Every setting is listed with its current value and the layer that supplied
+it (`default`, `user`, `project`, `dotenv`, `env`) — which is the answer to
+"why is this value not what I set". Type `/review` to filter by key or by
+help text, pick a row by number, and edit it in place: booleans are `y/n`,
+ranges and allowed values are checked *before* the write, `models.*.model` is
+chosen from a numbered list of known model ids instead of typed, and a blank
+line unsets an optional setting. A rejected value returns you to the table
+with the error, so the browser never exits mid-edit. `nextchap config --section
+models` opens it already filtered to one section, and `--project` pins writes
+to `./nextchap.toml` instead of asking.
+
+When there is no terminal — a pipe, a script, CI — the browser prompts nothing
+and prints the settings that differ from the defaults, then exits 0.
+
+Scripts and agents use the verbs instead; they are the same operations:
+
+```
+nextchap config list                 # only settings that differ from the defaults
+nextchap config list --all --json    # every setting, machine-readable
+nextchap config get generation.min_words   # value, source, declared default
+nextchap config set models.writer.reasoning low --project
+nextchap config unset retrieval.rerank --restore   # one-step undo
+nextchap config keys --json          # the schema: type, default, choices, help
+nextchap config edit --project       # $EDITOR, validated on save
+```
+
+`config set` validates the key against the registry, so a typo is refused
+(`config keys` lists them all) instead of silently writing a setting nothing
+reads. Writes are atomic, validated against the whole `Settings` model before
+they replace the file, and leave a `<file>.bak` behind for `unset --restore`.
+If an environment variable still overrides the value you just wrote, the CLI
+says so by name instead of letting you wonder — and `doctor` lists every env
+var that is hiding a config file. Example `nextchap.toml`:
 
 ```toml
 [defaults]
@@ -116,10 +169,10 @@ max_cost = 1.00          # default --max-cost
 scene_separator = "* * *" # "" joins scenes without a break
 
 [models.writer]
-model = "anthropic/claude-haiku-5.5"
+model = "deepseek/deepseek-v4.1-flash-1017"
 reasoning = "none"       # keep thinking off for prose
 max_tokens = 6000
-fallbacks = ["deepseek/deepseek-v4.1-flash-1017"]
+fallbacks = ["anthropic/claude-haiku-5.5"]
 
 [retrieval]
 embed_backend = "local"  # local | remote
@@ -193,7 +246,7 @@ logs/nextchap.log           full debug log (tracebacks land here)
 
 - **`doctor` says the API key failed:** check `OPENROUTER_API_KEY`. HTTP 402 means you're out of credits (top up at openrouter.ai).
 - **Empty answers or "spent on hidden reasoning":** lower the role's `reasoning` setting (`none` or `low`).
-- **The model refuses dark content:** point the writer role at another model, e.g. `nextchap config set models.writer.model deepseek/deepseek-v4.1-flash-1017`. A content-filter refusal is automatically retried once on the fallback model.
+- **The model refuses dark content:** point the writer role at another model, e.g. `nextchap config set models.writer.model anthropic/claude-haiku-5.5`. A content-filter refusal is automatically retried once on the fallback model.
 - **"Book is locked":** another `nextchap` process is working on that book.
 - **Wrong chapter splits:** look at the anomalies list in `import --dry-run`. Fix the source or `master_book.md`, then run `nextchap fix --rebuild-state`.
 
