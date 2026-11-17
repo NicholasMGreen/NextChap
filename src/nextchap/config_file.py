@@ -26,6 +26,7 @@ from nextchap.errors import ConfigError
 from nextchap.storage.atomic import atomic_write_text
 
 __all__ = [
+    "PROJECT_CONFIG",
     "backup_path",
     "drop_value",
     "env_shadow",
@@ -36,6 +37,7 @@ __all__ = [
     "read_layer_value",
     "restore_layer",
     "source_of",
+    "user_config_path",
     "validate_layer",
     "write_layer",
 ]
