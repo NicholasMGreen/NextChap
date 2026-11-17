@@ -52,6 +52,21 @@ def money(value: float) -> str:
     return f"${value:.4f}" if value < 1 else f"${value:.2f}"
 
 
+ROLE_STYLES = {"writer": "magenta", "planner": "yellow", "analyst": "cyan", "critic": "blue"}
+
+# U+F0CA9 (nf-md-gauge), dimmed segment prefix when the terminal has Nerd Fonts.
+FOOTER_ICON = "\U000f0ca9"
+
+
+def fmt_tokens(n: int) -> str:
+    """Compact token counts: 999 → ``999``, 41200 → ``41.2k``, 1300000 → ``1.3M``."""
+    if n < 1_000:
+        return str(n)
+    if n < 1_000_000:
+        return f"{n / 1_000:.1f}k"
+    return f"{n / 1_000_000:.1f}M"
+
+
 class _Dashboard:
     def __init__(self, reporter: RichReporter) -> None:
         self.r = reporter
@@ -126,12 +141,54 @@ class RichReporter:
     def footer(self) -> Text:
         m = self.meter
         t = Text()
-        t.append(" spend ", style="dim").append(money(m.total_cost), style="bold")
-        if m.max_cost is not None:
-            t.append(f" / {money(m.max_cost)}", style="dim")
-        t.append("  tokens ", style="dim").append(f"{m.prompt_tokens:,}→{m.completion_tokens:,}")
-        t.append("  cache ", style="dim").append(f"{m.cache_hit_rate:.0%}")
-        t.append("  writer ", style="dim").append(self.settings.models.writer.model, style="cyan")
+
+        def sep() -> None:
+            t.append(" · ", style="dim")
+
+        # Token counter: \u2191 prompt, \u2193 completion.
+        if self.settings.ui.footer_icon:
+            t.append(f" {FOOTER_ICON} ", style="dim")
+            t.append("\u2191", style="green").append(fmt_tokens(m.prompt_tokens), style="green")
+            t.append(" ")
+            t.append("\u2193", style="magenta").append(
+                fmt_tokens(m.completion_tokens), style="magenta"
+            )
+        else:
+            t.append(" in ", style="dim").append(fmt_tokens(m.prompt_tokens), style="green")
+            t.append(" out ", style="dim").append(fmt_tokens(m.completion_tokens), style="magenta")
+
+        rate = m.cache_hit_rate
+        cache_style = "dim" if rate < 0.10 else "cyan" if rate < 0.50 else "green"
+        sep()
+        t.append("cache ", style="dim").append(f"{rate:.0%}", style=cache_style)
+
+        sep()
+        t.append("spend ", style="dim")
+        if m.max_cost:
+            frac = m.total_cost / m.max_cost
+            spend_style = (
+                "bold green" if frac < 0.5 else "bold yellow" if frac < 0.8 else "bold red"
+            )
+            t.append(money(m.total_cost), style=spend_style)
+            t.append("/", style="dim").append(money(m.max_cost), style="dim")
+        else:
+            t.append(money(m.total_cost), style="bold yellow")
+
+        # What actually did the work in this run (zero-call roles stay hidden).
+        usage = m.by_role_model()
+        if usage:
+            order = list(self.settings.models.roles())
+            for role, model in sorted(
+                usage,
+                key=lambda k: (order.index(k[0]) if k[0] in order else len(order), k[0], k[1]),
+            ):
+                sep()
+                t.append(role, style=ROLE_STYLES.get(role, "cyan"))
+                t.append(f" {model}", style="dim")
+                t.append(f" ({usage[(role, model)].calls})", style="dim")
+        else:
+            sep()
+            t.append("writer ", style="dim").append(self.settings.models.writer.model, style="cyan")
         return t
 
     # ── Reporter protocol ─────────────────────────────────────────────────────

@@ -30,6 +30,7 @@ def cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureF
 def test_full_workflow(cli, novel_epub: Path, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     code, _, err = cli("import", str(novel_epub), "--dry-run")
     assert code == 0 and "Detected chapters" in err and "Estimated import cost" in err
+    assert "Step" in err
     assert not (tmp_path / "data" / "novel_books" / "novel").exists()
 
     code, _, err = cli("import", str(novel_epub), "--yes")
@@ -40,7 +41,7 @@ def test_full_workflow(cli, novel_epub: Path, tmp_path: Path) -> None:  # type: 
     assert code == 1 and "already exists" in err
 
     code, _, err = cli("generate", "novel", "--dry-run", "-n", "3")
-    assert code == 0 and "Estimated cost for 3 chapter(s)" in err
+    assert code == 0 and "Estimated cost for 3 chapter(s)" in err and "Step" in err
 
     code, _, err = cli("generate", "novel", "-n", "2")
     assert code == 0, err
